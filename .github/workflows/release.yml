@@ -1,0 +1,230 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: mcptracer
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  verify:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    steps:
+      # Tag v4 -> 11d5960a326750d5838078e36cf38b85af677262 (2026-07-16).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # Tag v5 -> a26af69be951a213d495a4c3e4e4022e16d87065 (2025-04-24).
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Verify packaged licensing and attribution
+        run: python scripts/sync_license_files.py --check
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test release source
+        run: cargo test --workspace --all-features --locked
+      - name: Test CLI workflows
+        run: python tests/test_proxy_integration.py
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          # Native ARM64 runner (not cross-compilation) so the Smoke-test
+          # step below can actually execute the built binary.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+    steps:
+      # Pin to a reviewed commit SHA (verified against the GitHub API).
+      # Tag v4 -> 11d5960a326750d5838078e36cf38b85af677262 (2026-07-16).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Tag v2 -> e18b497796c12c097a38f9edb9d0641fb99eee32 (2026-03-12).
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          key: ${{ matrix.target }}
+
+      # Verify the tag matches the version in Cargo.toml before building.
+      - name: Verify tag matches Cargo.toml version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # Strip leading 'v' so v0.3.0 → 0.3.0
+          tag_version="${tag#v}"
+          # The proxy inherits its version from [workspace.package], so read
+          # Cargo's resolved package identity instead of grepping for a local
+          # version assignment that does not exist.
+          cargo_version="$(cargo pkgid --package mcptracer-proxy | sed -E 's/.*@//')"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "ERROR: tag $tag_version does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+          echo "Version check passed: tag=$tag_version Cargo.toml=$cargo_version"
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin ${{ env.BIN_NAME }} --target ${{ matrix.target }}
+
+      - name: Smoke-test the release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}"
+          if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
+            bin="${bin}.exe"
+          fi
+          "$bin" --version
+          # Verify --version output matches the tag version.
+          ver_output="$("$bin" --version)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if ! echo "$ver_output" | grep -qF "$tag_version"; then
+            echo "ERROR: --version output '$ver_output' does not contain expected version '$tag_version'" >&2
+            exit 1
+          fi
+          echo "Smoke test passed: $ver_output"
+
+      - name: Package (unix)
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="${{ env.BIN_NAME }}-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}" "$staging/"
+          cp README.md LICENSE NOTICE COMMERCIAL-LICENSE.md CHANGELOG.md "$staging/"
+          tar czf "$staging.tar.gz" "$staging"
+          sha256sum "$staging.tar.gz" > "$staging.tar.gz.sha256"
+          rm -rf package-smoke
+          mkdir -p package-smoke
+          tar xzf "$staging.tar.gz" -C package-smoke
+          "package-smoke/$staging/${{ env.BIN_NAME }}" --version
+          echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
+          echo "CHECKSUM=$staging.tar.gz.sha256" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $staging = "${{ env.BIN_NAME }}-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}.exe" $staging
+          Copy-Item README.md,LICENSE,NOTICE,COMMERCIAL-LICENSE.md,CHANGELOG.md $staging
+          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "$staging.zip").Hash.ToLower()
+          # Out-File defaults to CRLF on Windows, which corrupts the combined
+          # SHA256SUMS.txt (and breaks `sha256sum -c` on that line) once the
+          # release job concatenates every platform's .sha256 file together.
+          # Write LF explicitly to match the unix-generated files.
+          [System.IO.File]::WriteAllText("$staging.zip.sha256", "$hash  $staging.zip`n")
+          Remove-Item -Recurse -Force package-smoke -ErrorAction SilentlyContinue
+          Expand-Archive -Path "$staging.zip" -DestinationPath package-smoke
+          & "package-smoke\\$staging\\${{ env.BIN_NAME }}.exe" --version
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET=$staging.zip"
+          Add-Content -Path $env:GITHUB_ENV -Value "CHECKSUM=$staging.zip.sha256"
+
+      - name: Attest build provenance
+        # actions/attest-build-provenance requires a public repo (or a paid
+        # plan with the feature enabled) - non-fatal so a private-repo
+        # release still publishes with checksums + SBOM even without
+        # provenance. Starts working automatically if the repo goes public.
+        continue-on-error: true
+        # Tag v2 -> e8998f949152b193b063cb0ec769d69d929409be (2025-06-11).
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: ${{ env.ASSET }}
+
+      # Tag v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02 (2025-03-19).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.CHECKSUM }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # Tag v4 -> 11d5960a326750d5838078e36cf38b85af677262 (2026-07-16).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      # Tag v4 -> d3f86a106a0bac45b974a628896c90dbdf5c8093 (2025-04-24).
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Combine checksums
+        run: |
+          set -euo pipefail
+          # tr -d '\r' defensively normalizes line endings regardless of
+          # which platform's package step produced a given .sha256 file -
+          # a single CRLF line breaks `sha256sum -c` on the combined file.
+          cat dist/*.sha256 | tr -d '\r' | sort -k2 > dist/SHA256SUMS.txt
+
+      - name: Verify combined checksums are self-consistent
+        run: |
+          set -euo pipefail
+          cd dist
+          # Verify every archive against its own embedded hash. This catches
+          # upload corruption before the release is published.
+          sha256sum -c SHA256SUMS.txt
+          echo "All archive checksums verified."
+
+      - name: Generate SBOM
+        # Tag v0 -> e22c389904149dbc22b58101806040fa8d37a610 (2026-03-19).
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dist/${{ env.BIN_NAME }}-${{ github.ref_name }}.cdx.json
+
+      - name: Attest SBOM provenance
+        # See the build job's Attest step: non-fatal on repos without access
+        # to GitHub's attestation feature (e.g. private user-owned repos).
+        continue-on-error: true
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: dist/${{ env.BIN_NAME }}-${{ github.ref_name }}.cdx.json
+
+      - name: Create GitHub release
+        # Tag v2 -> 3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 (2026-04-12).
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+          draft: false

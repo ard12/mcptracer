@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcptracer"
+version = "0.3.0-rc1"
+description = "Zero-install CLI wrapper for MCPTracer - the executable evidence and release-assurance layer for MCP"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {file = "LICENSE"}
+authors = [
+    { name = "MCPTracer contributors" }
+]
+keywords = ["mcp", "model-context-protocol", "testing", "tracing", "fastmcp", "assurance"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://github.com/ard12/mcptracer"
+Documentation = "https://github.com/ard12/mcptracer#readme"
+Repository = "https://github.com/ard12/mcptracer"
+
+[project.scripts]
+mcptracer = "mcptracer.cli:main"
+
+[tool.setuptools]
+license-files = ["LICENSE", "NOTICE", "COMMERCIAL-LICENSE.md"]

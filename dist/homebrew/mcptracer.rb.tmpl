@@ -1,0 +1,42 @@
+# Homebrew formula template for mcptracer.
+#
+# This is NOT a working tap by itself - Homebrew requires a formula to live
+# in a repo named "homebrew-<tap-name>" (e.g. ard12/homebrew-tap) before
+# `brew tap ard12/tap && brew install mcptracer` works. Generate the real
+# formula for a tagged release with:
+#
+#   scripts/generate-homebrew-formula.sh v0.2.0 > mcptracer.rb
+#
+# then copy mcptracer.rb into the tap repo's Formula/ directory and commit it
+# there. Placeholders below are filled in by that script from the release's
+# SHA256SUMS.txt, so the formula never hand-carries a checksum.
+class Mcptracer < Formula
+  desc "Local-first MCP recorder for regression testing"
+  homepage "https://github.com/ard12/mcptracer"
+  version "__VERSION__"
+  # Custom noncommercial terms: see LICENSE in the source/archive.
+  license :cannot_represent
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "https://github.com/ard12/mcptracer/releases/download/v__VERSION__/mcptracer-v__VERSION__-aarch64-apple-darwin.tar.gz"
+      sha256 "__SHA256_AARCH64_APPLE_DARWIN__"
+    else
+      url "https://github.com/ard12/mcptracer/releases/download/v__VERSION__/mcptracer-v__VERSION__-x86_64-apple-darwin.tar.gz"
+      sha256 "__SHA256_X86_64_APPLE_DARWIN__"
+    end
+  end
+
+  on_linux do
+    url "https://github.com/ard12/mcptracer/releases/download/v__VERSION__/mcptracer-v__VERSION__-x86_64-unknown-linux-gnu.tar.gz"
+    sha256 "__SHA256_X86_64_UNKNOWN_LINUX_GNU__"
+  end
+
+  def install
+    bin.install "mcptracer"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/mcptracer --version")
+  end
+end

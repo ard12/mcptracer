@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ard12/mcptracer/schemas/quota-report.v1.schema.json",
+  "title": "MCPTracer quota --json output (v1)",
+  "description": "Versioned output of `mcptracer quota --json`. Token provenance is mandatory: reported counts come from payload usage metadata; estimated counts use MCPTracer's uncalibrated payload_bytes / 4 fallback with a 10-token floor.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "session_id",
+        "preset",
+        "refill_rate_tokens_per_second",
+        "capacity_tokens",
+        "result"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "single_session" },
+        "session_id": { "type": "string" },
+        "preset": { "type": "string" },
+        "refill_rate_tokens_per_second": { "type": "number", "minimum": 0 },
+        "capacity_tokens": { "type": "number", "minimum": 0 },
+        "result": { "$ref": "#/$defs/simulation" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "preset",
+        "refill_rate_tokens_per_second",
+        "capacity_tokens",
+        "total_sessions",
+        "p429",
+        "max_p429_threshold",
+        "ok",
+        "token_sources",
+        "sessions"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "fleet" },
+        "preset": { "type": "string" },
+        "refill_rate_tokens_per_second": { "type": "number", "minimum": 0 },
+        "capacity_tokens": { "type": "number", "minimum": 0 },
+        "total_sessions": { "type": "integer", "minimum": 0 },
+        "p429": { "type": "number", "minimum": 0, "maximum": 1 },
+        "max_p429_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "ok": { "type": "boolean" },
+        "token_sources": { "$ref": "#/$defs/tokenSourceSummary" },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["session_id", "result"],
+            "properties": {
+              "session_id": { "type": "string" },
+              "result": { "$ref": "#/$defs/simulation" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "tokenSourceSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reported_events",
+        "reported_tokens",
+        "estimated_events",
+        "estimated_tokens"
+      ],
+      "properties": {
+        "reported_events": { "type": "integer", "minimum": 0 },
+        "reported_tokens": { "type": "integer", "minimum": 0 },
+        "estimated_events": { "type": "integer", "minimum": 0 },
+        "estimated_tokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "simulation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ok",
+        "first_violation_call_id",
+        "first_violation_time_s",
+        "total_violations",
+        "total_calls",
+        "total_tokens",
+        "token_sources",
+        "peak_demand_per_sec",
+        "peak_demand_token_sources",
+        "burst_factor"
+      ],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "first_violation_call_id": { "type": ["string", "null"] },
+        "first_violation_time_s": { "type": ["number", "null"] },
+        "total_violations": { "type": "integer", "minimum": 0 },
+        "total_calls": { "type": "integer", "minimum": 0 },
+        "total_tokens": { "type": "integer", "minimum": 0 },
+        "token_sources": { "$ref": "#/$defs/tokenSourceSummary" },
+        "peak_demand_per_sec": { "type": "integer", "minimum": 0 },
+        "peak_demand_token_sources": { "$ref": "#/$defs/tokenSourceSummary" },
+        "burst_factor": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "mcptracer-compat-ts-stdio",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Real MCP TypeScript SDK stdio server for MCPTracer's compatibility matrix (tests/compat). Not published.",
+  "type": "module",
+  "main": "server.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.24.0"
+  }
+}

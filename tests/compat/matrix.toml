@@ -1,0 +1,64 @@
+# MCPTracer real-SDK compatibility matrix. One [[cell]] per (SDK, transport)
+# combination. See tests/compat/README.md for how to run a single cell
+# locally and docs/spec/compatibility-matrix.md for published results.
+#
+# `required = true` cells make run_matrix.py exit nonzero on failure (CI
+# gate). `required = false` cells are recorded but never block the run --
+# use that for a cell known to carry a disclosed, diagnosed SDK difference
+# rather than deleting coverage for it.
+
+[[cell]]
+id = "ts-stdio"
+sdk = "typescript"
+sdk_package = "@modelcontextprotocol/sdk"
+sdk_version = "^1.30.0"
+transport = "stdio"
+server_dir = "servers/ts-stdio"
+command = ["node", "server.js"]
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = true
+
+[[cell]]
+id = "py-stdio"
+sdk = "python"
+sdk_package = "mcp"
+sdk_version = "1.29.0"
+transport = "stdio"
+server_dir = "servers/py-stdio"
+command = ["python3", "server.py"]
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = false
+# Diagnosed 2026-08-15, confirmed independent of MCPTracer: the SDK's own
+# stdio transport (FastMCP, anyio-based) can lose the response to the LAST
+# in-flight tool call if stdin reaches EOF before that call's async response
+# task finishes. Reproduced by piping the same client script directly into
+# `python server.py` with zero MCPTracer/proxy involvement -- flaky there
+# too (2-3 responses out of 3 across repeated runs), and adding an explicit
+# 300ms delay before closing stdin did not make it reliable, ruling out a
+# simple EOF-timing race. It is always the tools/call response (never
+# initialize or tools/list) that goes missing. See
+# docs/spec/compatibility-matrix.md for the full writeup. Left as
+# required = false rather than removed, so the flakiness stays visible
+# instead of being silently dropped from coverage.
+
+[[cell]]
+id = "ts-http"
+sdk = "typescript"
+sdk_package = "@modelcontextprotocol/sdk"
+sdk_version = "^1.30.0"
+transport = "http"
+server_dir = "servers/ts-http"
+command = ["node", "server.js"]
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = true
+
+[[cell]]
+id = "py-http"
+sdk = "python"
+sdk_package = "mcp"
+sdk_version = "1.29.0"
+transport = "http"
+server_dir = "servers/py-http"
+command = ["python3", "server.py"]
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = true

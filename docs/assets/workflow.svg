@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="170" viewBox="0 0 1100 170" role="img" aria-labelledby="title desc">
+<title id="title">MCPTracer regression workflow</title>
+<desc id="desc">Record a baseline, change your server, replay the session, compare the evidence, then pass or fail CI.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#377780" stroke-width="1.5"/></marker></defs>
+<rect width="1100" height="170" rx="14" fill="#f4f8fa"/>
+<rect x="20" y="25" width="188" height="120" rx="12" fill="#102536"/>
+<text x="38" y="53" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#60cbd0">01</text>
+<text x="38" y="87" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="23" fill="#ffffff">Record</text>
+<text x="38" y="115" font-family="Arial, Helvetica, sans-serif" font-size="18" fill="#c4d4e0">a baseline</text>
+<path d="M214 85H228" stroke="#377780" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="238" y="25" width="188" height="120" rx="12" fill="#102536"/>
+<text x="256" y="53" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#60cbd0">02</text>
+<text x="256" y="87" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="23" fill="#ffffff">Change</text>
+<text x="256" y="115" font-family="Arial, Helvetica, sans-serif" font-size="18" fill="#c4d4e0">your server</text>
+<path d="M432 85H446" stroke="#377780" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="456" y="25" width="188" height="120" rx="12" fill="#102536"/>
+<text x="474" y="53" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#60cbd0">03</text>
+<text x="474" y="87" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="23" fill="#ffffff">Replay</text>
+<text x="474" y="115" font-family="Arial, Helvetica, sans-serif" font-size="18" fill="#c4d4e0">the session</text>
+<path d="M650 85H664" stroke="#377780" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="674" y="25" width="188" height="120" rx="12" fill="#102536"/>
+<text x="692" y="53" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#60cbd0">04</text>
+<text x="692" y="87" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="23" fill="#ffffff">Compare</text>
+<text x="692" y="115" font-family="Arial, Helvetica, sans-serif" font-size="18" fill="#c4d4e0">the evidence</text>
+<path d="M868 85H882" stroke="#377780" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="892" y="25" width="188" height="120" rx="12" fill="#102536"/>
+<text x="910" y="53" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#60cbd0">05</text>
+<text x="910" y="87" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="23" fill="#ffffff">Pass / fail</text>
+<text x="910" y="115" font-family="Arial, Helvetica, sans-serif" font-size="18" fill="#c4d4e0">CI</text>
+</svg>

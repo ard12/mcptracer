@@ -1,0 +1,8 @@
+# Trusted tool contract for the real Python SDK HTTP server, pinned from a
+# session recorded against the unmodified server (MCPTRACER_COMPAT_RUGPULL
+# unset). Identical hash to servers/py-stdio/pin.toml since both define the
+# same tool contract -- expected, not a coincidence. Same bootstrap
+# procedure as examples/rug-pull-demo/pin.toml.
+[[assert]]
+kind = "tools_pinned"
+hashes = { send_email = "71b16153538d57492ff567acb21ef71dd253af2d690bd7d98d33df62e180ae6e" }

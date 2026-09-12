@@ -1,0 +1,212 @@
+name: MCPTracer
+description: Install mcptracer and optionally run record, replay, and assert gates.
+
+inputs:
+  version:
+    description: Release tag to install, for example v0.3.0. `latest` is accepted but pinning a specific tag is recommended.
+    required: false
+    default: v0.2.0
+  repository:
+    description: GitHub repository that publishes mcptracer release assets.
+    required: false
+    default: ard12/mcptracer
+  db:
+    description: SQLite database path passed to command examples through MCPTRACER_DB.
+    required: false
+    default: .mcptracer/sessions.db
+  record-command:
+    description: Trusted maintainer-authored shell code to record a fixture. Never pass untrusted PR or issue content.
+    required: false
+    default: ""
+  replay-command:
+    description: Trusted maintainer-authored shell code to replay a fixture. Never pass untrusted PR or issue content.
+    required: false
+    default: ""
+  assert-command:
+    description: Trusted maintainer-authored assertion shell code. Non-zero fails the workflow. Never pass untrusted content.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install mcptracer
+      shell: bash
+      env:
+        MCPTRACER_VERSION: ${{ inputs.version }}
+        MCPTRACER_REPOSITORY: ${{ inputs.repository }}
+      run: |
+        set -euo pipefail
+
+        # macOS runners ship python3 only; Windows runners ship python only.
+        PYTHON="$(command -v python3 || command -v python)"
+
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)
+            target="x86_64-unknown-linux-gnu"
+            ext="tar.gz"
+            bin="mcptracer"
+            ;;
+          macOS-X64)
+            target="x86_64-apple-darwin"
+            ext="tar.gz"
+            bin="mcptracer"
+            ;;
+          macOS-ARM64)
+            target="aarch64-apple-darwin"
+            ext="tar.gz"
+            bin="mcptracer"
+            ;;
+          Windows-X64)
+            target="x86_64-pc-windows-msvc"
+            ext="zip"
+            bin="mcptracer.exe"
+            ;;
+          *)
+            echo "Unsupported runner platform: ${RUNNER_OS}-${RUNNER_ARCH}" >&2
+            exit 2
+            ;;
+        esac
+
+        if [ "$MCPTRACER_VERSION" = "latest" ]; then
+          api_url="https://api.github.com/repos/${MCPTRACER_REPOSITORY}/releases/latest"
+          MCPTRACER_VERSION="$(
+            "$PYTHON" - "$api_url" <<'PY'
+        import json
+        import sys
+        import urllib.request
+
+        with urllib.request.urlopen(sys.argv[1]) as response:
+            print(json.load(response)["tag_name"])
+        PY
+          )"
+        fi
+
+        asset="mcptracer-${MCPTRACER_VERSION}-${target}.${ext}"
+        url="https://github.com/${MCPTRACER_REPOSITORY}/releases/download/${MCPTRACER_VERSION}/${asset}"
+        checksums_url="https://github.com/${MCPTRACER_REPOSITORY}/releases/download/${MCPTRACER_VERSION}/SHA256SUMS.txt"
+        install_dir="${RUNNER_TEMP}/mcptracer-bin"
+        archive="${RUNNER_TEMP}/${asset}"
+        checksums_file="${RUNNER_TEMP}/SHA256SUMS.txt"
+        mkdir -p "$install_dir"
+
+        # Download the archive.
+        "$PYTHON" - "$url" "$archive" <<'PY'
+        import sys
+        import urllib.request
+
+        urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
+        PY
+
+        # Download the release's SHA256SUMS.txt and verify the archive before
+        # extracting. This guards against tampering or download corruption.
+        "$PYTHON" - "$checksums_url" "$checksums_file" <<'PY'
+        import sys
+        import urllib.request
+
+        urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
+        PY
+
+        "$PYTHON" - "$archive" "$asset" "$checksums_file" <<'PY'
+        import hashlib
+        import sys
+
+        archive_path, asset_name, checksums_path = sys.argv[1:]
+
+        # Read the expected hash from SHA256SUMS.txt.
+        expected_hash = None
+        with open(checksums_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # Lines are: <hash>  <filename>
+                parts = line.split(None, 1)
+                if len(parts) == 2 and parts[1].strip() == asset_name:
+                    expected_hash = parts[0].lower()
+                    break
+
+        if expected_hash is None:
+            print(f"ERROR: {asset_name} not found in SHA256SUMS.txt", file=sys.stderr)
+            sys.exit(1)
+
+        # Compute the actual hash of the downloaded archive.
+        h = hashlib.sha256()
+        with open(archive_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        actual_hash = h.hexdigest().lower()
+
+        if actual_hash != expected_hash:
+            print(
+                f"ERROR: SHA256 mismatch for {asset_name}:\n"
+                f"  expected: {expected_hash}\n"
+                f"  actual:   {actual_hash}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        print(f"SHA256 verified: {asset_name} ({actual_hash})")
+        PY
+
+        # Extract the verified archive.
+        if [ "$ext" = "zip" ]; then
+          "$PYTHON" - "$archive" "$install_dir" "$bin" <<'PY'
+        import sys
+        import zipfile
+        from pathlib import Path
+
+        archive, install_dir, bin_name = sys.argv[1:]
+        with zipfile.ZipFile(archive) as zf:
+            member = next(
+                (name for name in zf.namelist() if name.endswith("/" + bin_name)),
+                None,
+            )
+            if member is None:
+                print(
+                    f"ERROR: could not find a member ending in \"/{bin_name}\" "
+                    f"in {archive}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            target = Path(install_dir) / bin_name
+            target.write_bytes(zf.read(member))
+        PY
+        else
+          tar -xzf "$archive" -C "$install_dir" --strip-components=1 "mcptracer-${MCPTRACER_VERSION}-${target}/${bin}"
+        fi
+
+        chmod +x "${install_dir}/${bin}" || true
+        echo "$install_dir" >> "$GITHUB_PATH"
+
+    - name: Show mcptracer version
+      shell: bash
+      run: mcptracer --version
+
+    - name: Run record command
+      if: inputs.record-command != ''
+      shell: bash
+      env:
+        MCPTRACER_DB: ${{ inputs.db }}
+        # Environment transport avoids direct expression interpolation into
+        # the generated script, but eval still executes this value as shell
+        # code. Only trusted workflow authors may supply command inputs;
+        # never populate them from PR titles, issue text, or other user data.
+        RECORD_COMMAND: ${{ inputs.record-command }}
+      run: eval "$RECORD_COMMAND"
+
+    - name: Run replay command
+      if: inputs.replay-command != ''
+      shell: bash
+      env:
+        MCPTRACER_DB: ${{ inputs.db }}
+        REPLAY_COMMAND: ${{ inputs.replay-command }}
+      run: eval "$REPLAY_COMMAND"
+
+    - name: Run assert command
+      if: inputs.assert-command != ''
+      shell: bash
+      env:
+        MCPTRACER_DB: ${{ inputs.db }}
+        ASSERT_COMMAND: ${{ inputs.assert-command }}
+      run: eval "$ASSERT_COMMAND"

@@ -1,0 +1,145 @@
+MCPTracer Noncommercial Attribution License 1.0
+Copyright (c) 2026 ard12 and MCPTracer contributors.
+
+Required Notice: MCPTracer by ard12 and contributors.
+Required Notice: Project source: https://github.com/ard12/mcptracer
+
+1. Scope and definitions
+
+This license applies to the MCPTracer source code, documentation, and project
+artwork supplied with this license (collectively, the Software), except
+material separately identified as third-party material. By exercising a right
+granted by this license, You accept its conditions. The Licensor is the
+copyright holder using the public
+handle ard12, to the extent that holder owns or is authorized to license the
+relevant rights. No rights in independently licensed third-party material are
+changed by this license.
+
+You means the person or legal entity using the Software. Commercial Use means
+use primarily intended for, directed toward, or performed in connection with
+commercial advantage or monetary compensation. It includes use in a business's
+internal operations or development, paid client work, a paid or monetized
+product or service, a hosted commercial offering, or development or evaluation
+for an anticipated commercial application. A purpose is Noncommercial only
+when it is outside that definition. An organization's nonprofit, educational,
+or governmental status does not by itself exempt its Commercial Use.
+Commercial Use includes providing the Software's functionality to others through
+a hosted service, API, managed service, integration, or paid support offering
+for a commercial purpose, even if the Software itself is described as free.
+Changing the Software's name, packaging, or delivery method does not change the
+commercial character of a use or remove these conditions.
+
+The Software does not include Your recordings, MCP payloads, or independently
+created code merely inspected or tested with it. This license grants the
+Licensor no ownership of those materials.
+
+2. Noncommercial permission
+
+Subject to every condition of this license, the Licensor grants You a worldwide,
+nonexclusive, royalty-free copyright license to use, run, study, copy, modify,
+and distribute the Software and works based on it solely for Noncommercial
+purposes. This includes personal study, unpaid hobby projects, and independent
+research without an anticipated commercial application. A recipient receives
+these permissions directly under this license, not by a sublicense from You.
+
+3. Commercial permission must be obtained separately
+
+No Commercial Use is authorized by this license. Before any Commercial Use,
+You must obtain a separate written license or written permission from ard12
+that identifies the permitted user or entity and the permitted use. Permission
+is not implied by source availability, a public repository, a download, an
+issue response that does not expressly grant it, a donation, or silence.
+Paying someone other than the Licensor does not grant Commercial Use rights.
+The Licensor alone decides whether to grant Commercial Use permission and on
+what fees, scope, duration, distribution, hosting, and attribution conditions.
+Nothing in this license obliges the Licensor to approve a request or offer the
+same terms to different parties.
+
+Any grant is limited to the party, use, and scope expressly identified in the
+writing. It does not automatically cover affiliates, customers, resellers,
+sublicensees, other deployments, or other versions. Commercial permissions may
+not be assigned, transferred, or sublicensed without the Licensor's express
+written consent. The noncommercial permissions and notices remain applicable
+to any use not expressly covered by a separate grant.
+
+Commercial permission must also specify attribution obligations; permission to
+use, modify, host, or distribute the Software is not permission to remove the
+Licensor's credit. Any exception to a condition must expressly identify that
+condition in a writing from the Licensor; unrelated conditions remain in force.
+
+4. Credit, notices, and distribution
+
+You must preserve copyright notices, the Required Notice lines above, and any
+applicable third-party notices in copies and modified versions of the Software.
+When distributing any substantial portion, include this license and the
+applicable NOTICE file. Do not distribute that portion under terms that grant
+Commercial Use rights You do not possess or remove these restrictions.
+
+If You publicly distribute or make available a project, service, demonstration,
+or publication that incorporates or materially relies on the Software, provide
+a reasonably visible credit in its documentation, credits page, or About screen:
+
+    Built with MCPTracer by ard12 and contributors.
+    https://github.com/ard12/mcptracer
+
+For a source-only distribution, this credit in its README or equivalent primary
+documentation is sufficient. Private Noncommercial use does not require making
+a public announcement or publishing private information; retaining the supplied
+notices is sufficient. Credit must not imply endorsement by ard12.
+
+Credit must remain legible, reasonably accessible to the relevant recipients
+or users, and include the project URL where links are supported. A renamed or
+modified version must still identify MCPTracer and ard12 as the source of the
+original Software. Do not remove, conceal, or replace that attribution with a
+claim that You created the original Software. Credit only in hidden metadata,
+minified source, or a location inaccessible to the relevant users is not enough
+where visible credit is required by this section.
+
+You must clearly identify Your material modifications and must not misrepresent
+them as an unmodified official MCPTracer version. These terms apply to the
+original Software contained in any modification; this license does not claim
+ownership of Your independently created contributions.
+
+5. Reserved rights and earlier licenses
+
+All rights not expressly granted are reserved. No trademark rights or rights to
+use the Licensor's identity to imply affiliation or endorsement are granted.
+This license does not limit rights that cannot be restricted by applicable law,
+such as applicable fair-use rights. It does not revoke permissions validly
+received for an earlier copy under a different license. Merely replacing a
+license file or changing repository visibility does not withdraw earlier grants.
+The Licensor's delay or failure to enforce a condition is not a waiver. Any
+waiver must be express and in writing and applies only to its stated scope.
+
+6. Termination
+
+Your permissions under this license terminate automatically on a material
+breach. For a first, inadvertent breach limited to attribution or notice
+requirements, permissions are reinstated if You fully correct the breach
+within 30 days after receiving written notice. This reinstatement does not
+apply to deliberate concealment, false authorship claims, repeated breaches,
+or unauthorized Commercial Use; those require express written reinstatement
+from the Licensor.
+
+After termination, cease the use, distribution, and access that relied on this
+license unless and until the Licensor grants written permission or the narrow
+reinstatement above applies. Termination does not remove liability for earlier
+breaches and does not affect compliant recipients with their own permissions.
+Commercial Use without written permission is outside the grant from the outset;
+there is no cure-period commercial trial and no automatic retroactive permission.
+
+7. Warranty and liability
+
+The Licensor has no obligation under this license to provide support,
+maintenance, updates, availability, compatibility, or a service level. Any such
+commitment requires a separate written agreement.
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE SOFTWARE IS PROVIDED
+AS IS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND
+NONINFRINGEMENT. TO THAT EXTENT, THE LICENSOR AND CONTRIBUTORS ARE NOT LIABLE
+FOR CLAIMS, DAMAGES, OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE,
+WHETHER IN CONTRACT, TORT, OR OTHERWISE. NOTHING IN THIS LICENSE EXCLUDES
+LIABILITY THAT APPLICABLE LAW DOES NOT ALLOW TO BE EXCLUDED.
+
+End of terms.

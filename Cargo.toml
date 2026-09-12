@@ -1,0 +1,46 @@
+[workspace]
+members = [
+    "crates/mcptracer-protocol",
+    "crates/mcptracer-redact",
+    "crates/mcptracer-storage",
+    "crates/mcptracer-model",
+    "crates/mcptracer-intel",
+    "crates/mcptracer-proxy",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.3.0-rc1"
+edition = "2021"
+license-file = "LICENSE"
+repository = "https://github.com/ard12/mcptracer"
+homepage = "https://github.com/ard12/mcptracer"
+authors = ["MCPTracer contributors"]
+keywords = ["mcp", "jsonrpc", "devtools", "agents", "tracing"]
+categories = ["development-tools", "development-tools::debugging", "command-line-utilities"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1.0"
+axum = "0.8"
+base64 = "0.22"
+bytes = "1.7"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+criterion = "0.5"
+dirs = "5.0"
+flate2 = "1.0"
+futures-util = "0.3"
+proptest = "1.5"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "1.0"
+tokio = { version = "1.38", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
+uuid = { version = "1.7", features = ["v4"] }

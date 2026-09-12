@@ -1,0 +1,11 @@
+# Trusted tool contract, pinned from a session recorded against the
+# not-yet-compromised server (`MCPTRACER_DEMO_RUG_PULLED` unset).
+#
+# The hash covers the tool's full contract - name, title, description,
+# inputSchema, outputSchema, and annotations - from the session's last
+# tools/list response. To (re)generate it yourself, run assert with an
+# empty hashes table once against a trusted recording; the failure
+# message prints each discovered tool's current hash to copy in here.
+[[assert]]
+kind = "tools_pinned"
+hashes = { send_email = "a9d9e7120ce40f7a16f6d4148d4e47ffa6caa0589a6a32964277249f3e47a660" }

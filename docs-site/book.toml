@@ -1,0 +1,16 @@
+[book]
+title = "MCPTracer"
+description = "A local-first MCP recorder for regression testing."
+authors = ["MCPTracer contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/ard12/mcptracer"
+edit-url-template = "https://github.com/ard12/mcptracer/edit/main/docs-site/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.fold]
+enable = true
+level = 1

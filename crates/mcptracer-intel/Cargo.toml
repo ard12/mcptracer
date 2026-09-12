@@ -1,0 +1,26 @@
+[package]
+name = "mcptracer-intel"
+description = "Local derived-memory fact extraction for recorded MCPTracer sessions."
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Local lexical search with domain-glossary query expansion over derived
+# facts. Off by default: experimental, see docs/spec/semantic-search.md.
+semantic-search = []
+
+[dependencies]
+anyhow = { workspace = true }
+mcptracer-model = { path = "../mcptracer-model", version = "=0.3.0-rc1" }
+mcptracer-storage = { path = "../mcptracer-storage", version = "=0.3.0-rc1" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }

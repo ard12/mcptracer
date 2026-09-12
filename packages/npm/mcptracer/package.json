@@ -1,0 +1,34 @@
+{
+  "name": "mcptracer",
+  "version": "0.3.0-rc1",
+  "description": "Zero-install CLI wrapper for MCPTracer - the executable evidence and release-assurance layer for MCP",
+  "bin": {
+    "mcptracer": "./bin/mcptracer.js"
+  },
+  "scripts": {
+    "test": "node ./bin/mcptracer.js --version"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ard12/mcptracer.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "tracing",
+    "record",
+    "replay",
+    "diff",
+    "testing",
+    "assertions"
+  ],
+  "author": "MCPTracer contributors",
+  "license": "SEE LICENSE IN LICENSE",
+  "bugs": {
+    "url": "https://github.com/ard12/mcptracer/issues"
+  },
+  "homepage": "https://github.com/ard12/mcptracer#readme",
+  "engines": {
+    "node": ">=18"
+  }
+}

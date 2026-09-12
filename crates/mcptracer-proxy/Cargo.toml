@@ -1,0 +1,58 @@
+[package]
+name = "mcptracer-proxy"
+description = "MCPTracer CLI: record and inspect MCP stdio sessions."
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+
+[[bin]]
+name = "mcptracer"
+path = "src/main.rs"
+
+# cargo-binstall metadata. Asset names are hardcoded to "mcptracer" (the
+# BIN_NAME used by .github/workflows/release.yml), not "{ name }", because
+# the binary name and this crate's package name (mcptracer-proxy) differ.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/mcptracer-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "mcptracer-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[features]
+default = []
+# `mcptracer semantic`: experimental local lexical search. Off by default;
+# see docs/spec/semantic-search.md.
+semantic-search = ["mcptracer-intel/semantic-search"]
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+dirs = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+mcptracer-intel = { path = "../mcptracer-intel", version = "=0.3.0-rc1" }
+mcptracer-model = { path = "../mcptracer-model", version = "=0.3.0-rc1" }
+mcptracer-protocol = { path = "../mcptracer-protocol", version = "=0.3.0-rc1" }
+mcptracer-redact = { path = "../mcptracer-redact", version = "=0.3.0-rc1" }
+mcptracer-storage = { path = "../mcptracer-storage", version = "=0.3.0-rc1" }

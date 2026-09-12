@@ -1,0 +1,9 @@
+# Trusted tool contract for the real TypeScript SDK HTTP server, pinned
+# from a session recorded against the unmodified server
+# (MCPTRACER_COMPAT_RUGPULL unset). Identical hash to
+# servers/ts-stdio/pin.toml since both define the same tool contract --
+# expected, not a coincidence. Same bootstrap procedure as
+# examples/rug-pull-demo/pin.toml.
+[[assert]]
+kind = "tools_pinned"
+hashes = { send_email = "df159e661af60ec7821484cdc6261cb1e3d58b382c6d3f40156f3822d3c21c65" }

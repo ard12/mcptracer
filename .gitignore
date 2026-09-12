@@ -1,0 +1,16 @@
+target/
+docs-site/book/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+.tmp/
+__pycache__/
+*.pyc
+*.pyc.*
+.DS_Store
+Thumbs.db
+node_modules/
+*.egg-info/
+tests/compat/servers/*/venv/

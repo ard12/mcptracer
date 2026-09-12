@@ -1,0 +1,10 @@
+# Release gate: no call to `search` may take longer than 100ms. The demo's
+# "current release" server responds in a few milliseconds; a regression that
+# adds an accidental synchronous network call or N+1 query pushes it to
+# hundreds of milliseconds, so 100ms comfortably separates the two without
+# being sensitive to ordinary local-machine noise.
+[[assert]]
+kind = "latency"
+description = "search never exceeds 100ms"
+tool = "search"
+max_under_ms = 100.0
