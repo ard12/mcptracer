@@ -52,7 +52,14 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
-          - os: macos-latest
+          # Intel runner on purpose. `macos-latest` is Apple Silicon, so
+          # building x86_64 there is a cross-compile and the Smoke-test step
+          # below - which *executes* the binary - would need Rosetta 2, which
+          # GitHub's ARM macOS images do not ship. If this label is ever
+          # retired the job fails fast with "no runner matching labels", which
+          # blocks the release rather than publishing an unexecuted binary;
+          # drop this target rather than moving it back to macos-latest.
+          - os: macos-13
             target: x86_64-apple-darwin
             archive_ext: tar.gz
           - os: macos-latest
@@ -86,7 +93,14 @@ jobs:
           # The proxy inherits its version from [workspace.package], so read
           # Cargo's resolved package identity instead of grepping for a local
           # version assignment that does not exist.
-          cargo_version="$(cargo pkgid --package mcptracer-proxy | sed -E 's/.*@//')"
+          #
+          # Strip to the last '#' OR '@', not just '@'. cargo pkgid omits the
+          # "<name>@" segment when the package name already matches its
+          # directory - which is the case here - so it prints
+          # "path+file:///...#0.3.0-rc1", and an '@'-only strip returns the
+          # entire URL and fails every comparison. This blocked the first
+          # release attempt.
+          cargo_version="$(cargo pkgid --package mcptracer-proxy | sed -E 's/.*[#@]//')"
           if [ "$tag_version" != "$cargo_version" ]; then
             echo "ERROR: tag $tag_version does not match Cargo.toml version $cargo_version" >&2
             exit 1
@@ -154,11 +168,12 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "CHECKSUM=$staging.zip.sha256"
 
       - name: Attest build provenance
-        # actions/attest-build-provenance requires a public repo (or a paid
-        # plan with the feature enabled) - non-fatal so a private-repo
-        # release still publishes with checksums + SBOM even without
-        # provenance. Starts working automatically if the repo goes public.
-        continue-on-error: true
+        # Was non-fatal while the repository was private, because
+        # actions/attest-build-provenance needs a public repo (or a paid plan).
+        # The repository is public now, so a failure here is a real failure:
+        # README tells users to run `gh attestation verify`, and swallowing the
+        # error would publish a release that silently lacks the provenance it
+        # claims to have.
         # Tag v2 -> e8998f949152b193b063cb0ec769d69d929409be (2025-06-11).
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
         with:
@@ -213,9 +228,7 @@ jobs:
           output-file: dist/${{ env.BIN_NAME }}-${{ github.ref_name }}.cdx.json
 
       - name: Attest SBOM provenance
-        # See the build job's Attest step: non-fatal on repos without access
-        # to GitHub's attestation feature (e.g. private user-owned repos).
-        continue-on-error: true
+        # See the build job's Attest step: now fatal, for the same reason.
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
         with:
           subject-path: dist/${{ env.BIN_NAME }}-${{ github.ref_name }}.cdx.json
@@ -228,3 +241,9 @@ jobs:
             dist/*
           generate_release_notes: true
           draft: false
+          # Any semver tag carrying a pre-release identifier (v0.3.0-rc1,
+          # -alpha, -beta) is published as a pre-release so it never becomes
+          # the "Latest release" a casual visitor downloads. Without this an
+          # -rc1 ships as stable, which is the specific mistake this project
+          # said it would not make.
+          prerelease: ${{ contains(github.ref_name, '-') }}
