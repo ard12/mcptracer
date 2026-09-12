@@ -39,8 +39,14 @@ installed binary for version/help checks and the complete rug-pull tutorial.
 
 ## Platform evidence
 
-The workflow is configured for Linux, macOS, and Windows, but configuration is
-not execution evidence. The compatibility results currently documented in this
-snapshot were obtained on Windows; Linux and macOS remain pending successful
-runs of the exact public commit. Building requires Rust 1.85+ and a working C
+A configured matrix is not proof that a commit passed, so this section records
+runs rather than configuration. Tests, the Rust 1.85 MSRV check, and the
+real-SDK compatibility matrix have all passed on Linux, macOS, and Windows for
+this snapshot's source revision; the Unix file-permission tests are included in
+that and were confirmed to execute rather than being filtered out. The
+compatibility matrix's Python stdio cell remains non-blocking with a disclosed,
+SDK-side flake — see `docs/spec/compatibility-matrix.md`.
+
+Check the Actions tab for the exact commit you intend to use; that is the only
+evidence that applies to it. Building requires Rust 1.85+ and a working C
 toolchain because `rusqlite` compiles bundled SQLite.

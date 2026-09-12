@@ -146,7 +146,7 @@ See [About MCPTracer](ABOUT.md) for the project and maintainer section.
 | Contact | Details |
 | --- | --- |
 | Commercial licensing | [Request permission](https://github.com/ard12/mcptracer/issues/new?template=licensing_request.md) |
-| Email | |
+| General contact | [Open a GitHub issue](https://github.com/ard12/mcptracer/issues/new) — no direct email is published |
 | Website | |
 | Other | |
 

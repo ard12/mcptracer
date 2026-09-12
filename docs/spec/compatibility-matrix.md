@@ -31,13 +31,16 @@ tool-contract hash), **export+verify** (offline digest match), **replay+diff**
 
 Node.js `v24.14.1`, Python `3.14.3`. Dates: harness built and run 2026-08-15.
 
-**Linux and macOS: wired into CI (`.github/workflows/ci.yml`'s `compat`
-job, three-OS matrix, same as `test`/`msrv`), not yet exercised by an
-actual run** — this pass built and ran the harness locally, on Windows,
-which is what this development environment has. The CI job will produce
-real Linux/macOS results on the next push; this row will be updated then,
-not before. Recorded here rather than silently implied to be covered,
-matching this document's own standard for the sections below.
+**Linux and macOS: exercised by real hosted runs as of 2026-09-12.** The table
+above records the original Windows-only local run; the `compat` job has since
+passed on `ubuntu-latest`, `macos-latest`, and `windows-latest`, both on the
+private source revision and on the public repository's own CI for the exact
+published commit. A passing `compat` job means every **required** cell passed —
+the Python stdio cell is `required = false`, so its disclosed SDK-side flake
+does not gate the job and its per-OS status is not established by a green run.
+The per-cell, per-OS table below has not been re-measured on Linux or macOS and
+still reflects the Windows run; treat the OS column as "where this cell was
+measured", not as a claim of parity.
 
 ### Checked directly, not a finding
 

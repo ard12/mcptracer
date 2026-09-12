@@ -96,8 +96,10 @@ on it rather than sniffing the document's contents.
 
 ### Known boundaries
 
-- Compatibility evidence in this snapshot is Windows-only; Linux and macOS
-  workflow results are pending the exact public commit.
+- Compatibility evidence covers Linux, macOS, and Windows for this snapshot's
+  source revision, but only the SDK cells enumerated in
+  `tests/compat/matrix.toml` — the Python stdio cell is non-blocking because of
+  a disclosed SDK-side flake, and no cell exercises a 2026-07-28-era SDK.
 - Modern TypeScript/Python/Go/C# SDK coverage, progress alongside MRTR, cache
   evidence semantics, and extension negotiation remain incomplete.
 - Recorded tool drift proves change, not malicious intent. Replay proves server
