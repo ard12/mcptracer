@@ -22,12 +22,24 @@ if ([Environment]::Is64BitOperatingSystem -eq $false) {
     throw "mcptracer only publishes 64-bit Windows binaries (x86_64-pc-windows-msvc)."
 }
 
+$NoStableReleaseMsg = "no stable release has been published yet (GitHub's latest-release endpoint deliberately excludes prereleases). The current preview build is a prerelease -- install it explicitly: `$env:MCPTRACER_VERSION = 'v0.3.0-rc1'; irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex"
+
 $Version = $env:MCPTRACER_VERSION
 if (-not $Version) {
     Write-InstallLog "resolving latest release..."
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
-    $Version = $release.tag_name
-    if (-not $Version) { throw "could not resolve the latest release tag" }
+    # /releases/latest only ever returns the newest *stable* release, never a
+    # prerelease, and throws on a 404 when no stable release exists. We
+    # deliberately do NOT fall back to "newest release including
+    # prereleases" here: installing a prerelease must stay an explicit,
+    # opted-into act via $env:MCPTRACER_VERSION, not something this script
+    # decides on the user's behalf.
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
+        $Version = $release.tag_name
+    } catch {
+        $Version = $null
+    }
+    if (-not $Version) { throw $NoStableReleaseMsg }
 }
 $Tag = if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
 
@@ -63,7 +75,16 @@ try {
     Copy-Item $SourceBinary (Join-Path $InstallDir "$BinName.exe") -Force
 
     Write-InstallLog "installed $Tag to $InstallDir\$BinName.exe"
-    & (Join-Path $InstallDir "$BinName.exe") --version
+    $InstalledBinary = Join-Path $InstallDir "$BinName.exe"
+    $VersionCheckFailure = "installed binary does not run: $InstalledBinary (likely causes: wrong CPU architecture, a missing runtime dependency such as the VC++ redistributable, or a corrupted extraction -- try removing $InstallDir and reinstalling)"
+    try {
+        & $InstalledBinary --version
+    } catch {
+        throw $VersionCheckFailure
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw $VersionCheckFailure
+    }
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (($userPath -split ";") -notcontains $InstallDir) {

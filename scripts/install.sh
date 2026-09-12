@@ -66,12 +66,24 @@ sha256_of() {
 
 TARGET="$(detect_target)"
 
+NO_STABLE_RELEASE_MSG="no stable release has been published yet (GitHub's latest-release endpoint deliberately excludes prereleases). The current preview build is a prerelease -- install it explicitly: MCPTRACER_VERSION=v0.3.0-rc1 sh install.sh (or: curl -fsSL <install.sh-url> | MCPTRACER_VERSION=v0.3.0-rc1 sh)"
+
 VERSION="${MCPTRACER_VERSION:-}"
 if [ -z "$VERSION" ]; then
     log "resolving latest release..."
-    VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-        | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
-    [ -n "$VERSION" ] || die "could not resolve the latest release tag"
+    # /releases/latest only ever returns the newest *stable* release, never a
+    # prerelease. We deliberately do NOT fall back to "newest release
+    # including prereleases" when it comes up empty: installing a prerelease
+    # must stay an explicit, opted-into act via MCPTRACER_VERSION, not
+    # something this script decides on the user's behalf.
+    set +e
+    LATEST_JSON="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null)"
+    CURL_STATUS=$?
+    set -e
+    if [ "$CURL_STATUS" -eq 0 ]; then
+        VERSION="$(printf '%s' "$LATEST_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+    fi
+    [ -n "$VERSION" ] || die "$NO_STABLE_RELEASE_MSG"
 fi
 case "$VERSION" in
     v*) TAG="$VERSION" ;;
@@ -104,7 +116,7 @@ mkdir -p "$INSTALL_DIR"
 install -m 755 "$STAGING/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
 
 log "installed ${TAG} to ${INSTALL_DIR}/${BIN_NAME}"
-"$INSTALL_DIR/$BIN_NAME" --version >&2 || true
+"$INSTALL_DIR/$BIN_NAME" --version >&2 || die "installed binary does not run: ${INSTALL_DIR}/${BIN_NAME} (likely causes: wrong CPU architecture, a missing shared library, or a corrupted extraction -- try removing ${INSTALL_DIR}/${BIN_NAME} and reinstalling)"
 
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;

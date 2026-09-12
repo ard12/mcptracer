@@ -55,11 +55,10 @@ jobs:
           # Intel runner on purpose. `macos-latest` is Apple Silicon, so
           # building x86_64 there is a cross-compile and the Smoke-test step
           # below - which *executes* the binary - would need Rosetta 2, which
-          # GitHub's ARM macOS images do not ship. If this label is ever
-          # retired the job fails fast with "no runner matching labels", which
-          # blocks the release rather than publishing an unexecuted binary;
-          # drop this target rather than moving it back to macos-latest.
-          - os: macos-13
+          # GitHub's ARM macOS images do not ship. GitHub retired the
+          # macos-13 Intel image in December 2025; macos-15-intel is the
+          # current supported Intel macOS runner label.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             archive_ext: tar.gz
           - os: macos-latest

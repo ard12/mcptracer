@@ -8,7 +8,8 @@
     ".github/actions/mcptracer/action.yml": "a50ca86cc0c0bad5c59e12d3732f582b58ddc2206f3a669c8a5dacdbf93e7a34",
     ".github/workflows/ci.yml": "d47ed12d83b80a7b28e70cd04f3f896a70463289c8973eb8ec8865ce520bd0be",
     ".github/workflows/docs.yml": "23801e64ded3595597b23477a47ebc2e09d9d9579405e49a3f758ff9731b97c2",
-    ".github/workflows/release.yml": "df850ea9dd30eeeccbc4007b239ac7a4accbf312dbae88b26ed6163d05f896c2",
+    ".github/workflows/release-rehearsal.yml": "4c05a073366c416f27229a9f3c2d2b1579c6fa9d913c472d0123f418bb2c4a7c",
+    ".github/workflows/release.yml": "dff8af33f11cef860accb19c662b71d7f965a5bc28a23f62f10a26c9fcd47b14",
     ".gitignore": "9fb200cbd44ef1d8740b4eb518ffc52d53356087db94a93e1abcb2ec052649d5",
     "ABOUT.md": "7f66a1bf53b6ca91f7ea57b033883dc887bc4ee4e418511733e6465800a207fe",
     "CHANGELOG.md": "5aa48e72f75a55d77471cc7f8381c7eab6f89aebbb782c3abf8e48529d4ac044",
@@ -209,9 +210,9 @@
     "scripts/generate-capability-reference.sh": "31ab635ec137359746fb39ba720d1e3d65bd6976064dab5189c44cf1629fa87c",
     "scripts/generate-cli-reference.sh": "58dcd31fc26d99b9e9327a5d74d4e0888b79735b85d74376d793c615b78cdfb5",
     "scripts/generate-homebrew-formula.sh": "3c820135b4a5e5f333d64ee8a31b3afab9774c374dda0d61a22b18b01586d76a",
-    "scripts/install.ps1": "a7c4107b39d355f9fb8e6cf240903b1dbf80777de5d3d3c4b1d91d05fffdb95c",
-    "scripts/install.sh": "209e1e065b43afa4750758fce17fda8e012d249195ea3e17dcd318fd8622db1c",
-    "scripts/source_preview_smoke.py": "2a5e249abcd5e038fd0457140e025dd2ba861575dabad3e5e4224a24e71f899a",
+    "scripts/install.ps1": "98c3db33aa4a74e516ca658e37e46b88346985f628522349821b4d0df5cdd7e8",
+    "scripts/install.sh": "a315864d05ce51f5d40e6b3176d0c6e9cc6fb5f46a83b2bd9bc3d1d8183a64d4",
+    "scripts/source_preview_smoke.py": "34b51e496fce4750fdaecf2a9878502c23a7dacde5cc85825f50751e2e405f29",
     "scripts/sync_license_files.py": "038d6976d442d0cca7f60fbef39a5d093aac3fe2b501417ff1a9e33b06ad80ae",
     "scripts/verify_oss_export.py": "943cbd144e42caaf3ec7619f5db259977cbbd6e9558bb29f14fdbee947cdd3e4",
     "scripts/verify_public_cutover.py": "221381ebc32da545681e448a4c99a04f963837da43bae1237e6a0d1ff6e78939",
@@ -271,7 +272,7 @@
     "docs-site/src/architecture/intelligence-layer.md",
     "docs-site/src/architecture/phase1.md"
   ],
-  "source_commit": "5db77c99fc5d6fa455a444e0e32c1ecc4b1ab443",
+  "source_commit": "f6f6a22f43df535772e3d4a55cbbccbe5ba22fd6",
   "source_policy_sha256": "ea5598816ae570b06b3afc631ef926bf3c38db1d11dd04fc7bbd07b11d84a3ad",
   "unhashed_generated_files": [
     "OSS_EXPORT_MANIFEST.json"
