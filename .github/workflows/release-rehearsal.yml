@@ -220,22 +220,33 @@ jobs:
         # --binary option so the script skips its own cargo build and tests
         # the artifact this job just packaged.
         #
-        # The candidate directory is not always `.`. source_preview_smoke.py
-        # starts by verifying the candidate against OSS_EXPORT_MANIFEST.json,
-        # which exists only in a *generated* tree. The public repository's
-        # checkout is such a tree, so `.` works there. The private source
-        # repository has no manifest at its root, so `.` fails export
-        # verification before the binary is ever exercised - confirmed by
-        # running it. Generate a throwaway export in that case; the exporter
-        # is a reserved path, so it is present exactly when it is needed.
+        # The candidate must never be `.`. source_preview_smoke.py begins by
+        # verifying its candidate against OSS_EXPORT_MANIFEST.json, and that
+        # verifier fails closed on any file the manifest does not list - which
+        # is exactly what it is for. By this point the steps above have
+        # written the staging directory, the archive, its .sha256 and
+        # rehearsal-extract/ into this checkout, so passing `.` fails export
+        # verification before the binary is ever exercised. The first
+        # rehearsal run failed this way on all five targets.
+        #
+        # So hand it a pristine tree instead:
+        #   - public repository: the checkout IS a generated tree, so extract
+        #     the committed tree with `git archive` - tracked files only, none
+        #     of the build output we just created.
+        #   - private repository: no manifest at the root, so generate an
+        #     export. The exporter is a reserved path, present exactly when
+        #     it is needed.
+        # Both land outside the repository so neither can pollute it either.
         shell: bash
         run: |
           set -euo pipefail
+          candidate="../rehearsal-candidate"
+          rm -rf "$candidate"
+          mkdir -p "$candidate"
           if [ -f OSS_EXPORT_MANIFEST.json ]; then
-            candidate="."
-            echo "Candidate: this checkout (generated tree, manifest present)"
+            git archive HEAD | tar -x -C "$candidate"
+            echo "Candidate: pristine copy of the committed tree at $candidate"
           elif [ -f scripts/export_oss.py ]; then
-            candidate="$RUNNER_TEMP/rehearsal-candidate"
             rm -rf "$candidate"
             python scripts/export_oss.py --ref HEAD --output "$candidate"
             echo "Candidate: freshly generated export at $candidate"
@@ -244,7 +255,7 @@ jobs:
             echo "cannot establish a candidate tree for the smoke runner." >&2
             exit 1
           fi
-          python scripts/source_preview_smoke.py "$candidate" --binary "${{ env.BIN_PATH }}"
+          python scripts/source_preview_smoke.py "$candidate" --binary "$PWD/${{ env.BIN_PATH }}"
 
       # Tag v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02 (2025-03-19).
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

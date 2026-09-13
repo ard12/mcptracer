@@ -110,6 +110,10 @@ impl SetupClient {
 
 struct SetupResult {
     wrapped_servers: usize,
+    // Distinguishes "this config has no stdio servers at all" from "every
+    // stdio server here is already wrapped" - both produce wrapped_servers
+    // == 0, but only the latter is a successful idempotent re-run.
+    total_stdio_servers: usize,
     backup_path: Option<PathBuf>,
 }
 
@@ -125,10 +129,21 @@ pub async fn run(args: SetupArgs) -> Result<()> {
     let result = inject_config(client, &path)?;
 
     if result.wrapped_servers == 0 {
-        println!(
-            "[mcptracer] no unwrapped stdio MCP servers found in {}",
-            path.display()
-        );
+        if result.total_stdio_servers == 0 {
+            println!(
+                "[mcptracer] no stdio MCP servers found in {} (nothing to wrap)",
+                path.display()
+            );
+        } else {
+            // Not an error: re-running `setup` on an already-wrapped config
+            // is expected to be a no-op, and the user should be told it
+            // succeeded rather than left wondering whether anything ran.
+            println!(
+                "[mcptracer] all {} stdio MCP server(s) in {} are already wrapped; nothing to do",
+                result.total_stdio_servers,
+                path.display()
+            );
+        }
     } else {
         let backup = result
             .backup_path
@@ -139,6 +154,21 @@ pub async fn run(args: SetupArgs) -> Result<()> {
             client.display_name(),
             path.display(),
             backup.display()
+        );
+        println!(
+            "[mcptracer] restart {} completely for the change to take effect - most MCP \
+             clients only read their server config at startup, so nothing is recorded until \
+             you do",
+            client.display_name()
+        );
+        println!(
+            "[mcptracer] recordings will be stored at {}",
+            mcptracer_storage::default_db_path().display()
+        );
+        println!("[mcptracer] see them with: mcptracer sessions list");
+        println!(
+            "[mcptracer] undo with: mcptracer setup {} --undo",
+            client.display_name()
         );
     }
     Ok(())
@@ -190,7 +220,7 @@ fn inject_config(client: SetupClient, path: &Path) -> Result<SetupResult> {
     // command string, instead of every test depending on the real
     // current_exe() of whatever binary happens to be running the test suite.
     let mcptracer_command = resolve_mcptracer_command();
-    let (updated, wrapped_servers) = if client.is_toml() {
+    let (updated, total_stdio_servers, wrapped_servers) = if client.is_toml() {
         inject_toml(&original, client, &mcptracer_command)?
     } else {
         inject_json(&original, client, &mcptracer_command)?
@@ -199,6 +229,7 @@ fn inject_config(client: SetupClient, path: &Path) -> Result<SetupResult> {
     if wrapped_servers == 0 {
         return Ok(SetupResult {
             wrapped_servers,
+            total_stdio_servers,
             backup_path: None,
         });
     }
@@ -213,6 +244,7 @@ fn inject_config(client: SetupClient, path: &Path) -> Result<SetupResult> {
     write_with_backup(path, &original, updated.as_bytes(), &backup_path)?;
     Ok(SetupResult {
         wrapped_servers,
+        total_stdio_servers,
         backup_path: Some(backup_path),
     })
 }
@@ -239,11 +271,15 @@ fn restore_config(client: SetupClient, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Returns `(rewritten config, stdio servers seen, stdio servers newly
+/// wrapped)`. The "seen" count includes servers that were already wrapped,
+/// so callers can tell "no stdio servers here" apart from "already wrapped"
+/// even when the "newly wrapped" count is zero for both.
 fn inject_json(
     original: &str,
     client: SetupClient,
     mcptracer_command: &str,
-) -> Result<(String, usize)> {
+) -> Result<(String, usize, usize)> {
     // VS Code's `mcp.json` is documented to accept JSONC: `//` and `/* */`
     // comments, plus trailing commas before `}`/`]`. Try strict JSON first -
     // it's the common case for the other clients and gives the most precise
@@ -278,6 +314,7 @@ fn inject_json(
         .and_then(Value::as_object_mut)
         .ok_or_else(|| anyhow!("JSON MCP configuration must contain an object `{server_key}`"))?;
 
+    let mut total_stdio_servers = 0;
     let mut wrapped_servers = 0;
     for (server_name, server) in servers {
         let server_object = server
@@ -286,11 +323,16 @@ fn inject_json(
         if !server_object.contains_key("command") {
             continue;
         }
+        total_stdio_servers += 1;
         if wrap_json_server(server_object, client, mcptracer_command)? {
             wrapped_servers += 1;
         }
     }
-    Ok((serde_json::to_string_pretty(&root)? + "\n", wrapped_servers))
+    Ok((
+        serde_json::to_string_pretty(&root)? + "\n",
+        total_stdio_servers,
+        wrapped_servers,
+    ))
 }
 
 /// Best-effort conversion of JSONC into strict JSON that `serde_json`
@@ -485,11 +527,13 @@ fn wrap_json_server(
     Ok(true)
 }
 
+/// Returns `(rewritten config, stdio servers seen, stdio servers newly
+/// wrapped)` - see `inject_json` for why both counts matter.
 fn inject_toml(
     original: &str,
     client: SetupClient,
     mcptracer_command: &str,
-) -> Result<(String, usize)> {
+) -> Result<(String, usize, usize)> {
     let mut root = toml::from_str::<toml::Value>(original)
         .context("refusing to modify an invalid TOML MCP configuration")?;
     let servers = root
@@ -497,6 +541,7 @@ fn inject_toml(
         .and_then(toml::Value::as_table_mut)
         .ok_or_else(|| anyhow!("Codex configuration must contain a `[mcp_servers]` table"))?;
 
+    let mut total_stdio_servers = 0;
     let mut wrapped_servers = 0;
     for (server_name, server) in servers {
         let server_table = server
@@ -505,6 +550,7 @@ fn inject_toml(
         if !server_table.contains_key("command") {
             continue;
         }
+        total_stdio_servers += 1;
         if wrap_toml_server(server_table, client, mcptracer_command)? {
             wrapped_servers += 1;
         }
@@ -521,7 +567,11 @@ fn inject_toml(
              writer. Your original is saved in the `{BACKUP_SUFFIX}` backup."
         );
     }
-    Ok((toml::to_string_pretty(&root)?, wrapped_servers))
+    Ok((
+        toml::to_string_pretty(&root)?,
+        total_stdio_servers,
+        wrapped_servers,
+    ))
 }
 
 fn wrap_toml_server(
@@ -838,14 +888,20 @@ mod tests {
         // `already_wrapped_entry_using_absolute_path_is_skipped` test above
         // already covers idempotency for a real resolved absolute path.
         let original = r#"{"servers":{"local":{"command":"python","args":["server.py"]}}}"#;
-        let (wrapped_once, wrapped_once_count) =
+        let (wrapped_once, total_once, wrapped_once_count) =
             inject_json(original, SetupClient::Vscode, "mcptracer").unwrap();
+        assert_eq!(total_once, 1);
         assert_eq!(wrapped_once_count, 1);
         let updated: Value = serde_json::from_str(&wrapped_once).unwrap();
         assert_eq!(updated["servers"]["local"]["args"][0], "record");
 
-        let (_wrapped_twice, wrapped_twice_count) =
+        let (_wrapped_twice, total_twice, wrapped_twice_count) =
             inject_json(&wrapped_once, SetupClient::Vscode, "mcptracer").unwrap();
+        // The server is still there and still stdio - it's just already
+        // wrapped - so the "seen" count stays 1 while "newly wrapped" drops
+        // to 0. That distinction is what lets `run()` report "already
+        // wrapped" instead of "no stdio servers found".
+        assert_eq!(total_twice, 1);
         assert_eq!(wrapped_twice_count, 0);
     }
 
@@ -942,12 +998,13 @@ url = "https://example.test/mcp"
             "/home/test/.local/bin/mcptracer"
         };
 
-        let (json_updated, json_wrapped) = inject_json(
+        let (json_updated, json_total, json_wrapped) = inject_json(
             r#"{"mcpServers":{"local":{"command":"npx","args":["-y","server"]}}}"#,
             SetupClient::ClaudeDesktop,
             mcptracer_command,
         )
         .unwrap();
+        assert_eq!(json_total, 1);
         assert_eq!(json_wrapped, 1);
         let json_value: Value = serde_json::from_str(&json_updated).unwrap();
         assert_eq!(
@@ -955,12 +1012,13 @@ url = "https://example.test/mcp"
             mcptracer_command
         );
 
-        let (toml_updated, toml_wrapped) = inject_toml(
+        let (toml_updated, toml_total, toml_wrapped) = inject_toml(
             "[mcp_servers.local]\ncommand = \"uvx\"\nargs = [\"server\"]\n",
             SetupClient::Codex,
             mcptracer_command,
         )
         .unwrap();
+        assert_eq!(toml_total, 1);
         assert_eq!(toml_wrapped, 1);
         let toml_value: toml::Value = toml::from_str(&toml_updated).unwrap();
         assert_eq!(
@@ -997,8 +1055,9 @@ url = "https://example.test/mcp"
             r#"{{"mcpServers":{{"local":{{"command":{:?},"args":["record","--client","claude-desktop","--","npx","-y","server"]}}}}}}"#,
             absolute_path
         );
-        let (_updated, wrapped) =
+        let (_updated, total, wrapped) =
             inject_json(&already_wrapped, SetupClient::ClaudeDesktop, absolute_path).unwrap();
+        assert_eq!(total, 1);
         assert_eq!(wrapped, 0);
     }
 
@@ -1016,12 +1075,13 @@ url = "https://example.test/mcp"
   },
 }
 "#;
-        let (updated, wrapped) = inject_json(
+        let (updated, total, wrapped) = inject_json(
             original,
             SetupClient::ClaudeDesktop,
             "/opt/mcptracer/bin/mcptracer",
         )
         .unwrap();
+        assert_eq!(total, 1);
         assert_eq!(wrapped, 1);
         let value: Value = serde_json::from_str(&updated).unwrap();
         assert_eq!(
@@ -1077,5 +1137,247 @@ url = "https://example.test/mcp"
         assert!(err
             .to_string()
             .contains("refusing to modify an invalid JSON MCP configuration"));
+    }
+
+    #[test]
+    fn wrapping_a_json_server_preserves_every_other_field_on_it() {
+        // wrap_json_server only ever calls `.insert("command", ...)` and
+        // `.insert("args", ...)` on the server's Map - this pins that down
+        // end-to-end for the field shapes a real config actually carries
+        // (a nested `env` object, `cwd`, a numeric `timeout`, and one field
+        // mcptracer has never heard of) rather than trusting that by
+        // reading the implementation.
+        let original = r#"{
+  "mcpServers": {
+    "local": {
+      "command": "npx",
+      "args": ["-y", "server"],
+      "env": {"TOKEN": "keep", "NESTED": {"a": 1}},
+      "cwd": "/srv/app",
+      "timeout": 30,
+      "experimentalFlag": true
+    }
+  }
+}
+"#;
+        let (updated, total, wrapped) = inject_json(
+            original,
+            SetupClient::ClaudeDesktop,
+            "/opt/mcptracer/bin/mcptracer",
+        )
+        .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(wrapped, 1);
+
+        let value: Value = serde_json::from_str(&updated).unwrap();
+        let local = &value["mcpServers"]["local"];
+        assert_eq!(
+            local["env"],
+            serde_json::json!({"TOKEN": "keep", "NESTED": {"a": 1}})
+        );
+        assert_eq!(local["cwd"], "/srv/app");
+        assert_eq!(local["timeout"], 30);
+        assert_eq!(local["experimentalFlag"], true);
+        // Only command/args were actually meant to change.
+        assert_eq!(local["command"], "/opt/mcptracer/bin/mcptracer");
+        assert_eq!(local["args"][0], "record");
+    }
+
+    #[test]
+    fn json_wrapping_leaves_unrelated_servers_and_top_level_keys_untouched() {
+        // Three things sharing one file that `setup` must never conflate:
+        // a server already wrapped (must be a pure no-op), an HTTP/SSE
+        // server (has no `command`, so it's not even stdio), and top-level
+        // keys that live alongside `mcpServers` rather than inside it.
+        let original = r#"{
+  "version": 2,
+  "logging": {"level": "debug"},
+  "mcpServers": {
+    "already_wrapped": {
+      "command": "/opt/mcptracer/bin/mcptracer",
+      "args": ["record", "--client", "claude-desktop", "--", "npx", "-y", "server"]
+    },
+    "http_server": {"type": "http", "url": "https://example.test/mcp"},
+    "local": {"command": "npx", "args": ["-y", "server"]}
+  }
+}
+"#;
+        let before: Value = serde_json::from_str(original).unwrap();
+        let (updated, total, wrapped) = inject_json(
+            original,
+            SetupClient::ClaudeDesktop,
+            "/opt/mcptracer/bin/mcptracer",
+        )
+        .unwrap();
+        // `already_wrapped` and `local` both have `command`; `http_server`
+        // does not, so it's excluded from the stdio count entirely.
+        assert_eq!(total, 2);
+        assert_eq!(wrapped, 1);
+
+        let after: Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(
+            after["mcpServers"]["already_wrapped"],
+            before["mcpServers"]["already_wrapped"]
+        );
+        assert_eq!(
+            after["mcpServers"]["http_server"],
+            before["mcpServers"]["http_server"]
+        );
+        assert_eq!(after["version"], 2);
+        assert_eq!(after["logging"], serde_json::json!({"level": "debug"}));
+    }
+
+    #[test]
+    fn json_wrapping_preserves_paths_and_args_containing_spaces_in_order() {
+        // Nothing in this module ever tokenizes `command`/`args` through a
+        // shell - they are JSON strings copied around as opaque values -
+        // but that guarantee is worth pinning down explicitly for the
+        // paths-with-spaces case Windows users hit constantly (Program
+        // Files installs) plus a positional arg with embedded spaces, and
+        // for the exact order everything must come back in after `--`.
+        let original = serde_json::json!({
+            "mcpServers": {
+                "local": {
+                    "command": r"C:\Program Files\My Tool\server.exe",
+                    "args": [
+                        "--data-dir",
+                        r"C:\Program Files\Data Dir\",
+                        "positional arg with spaces",
+                        "--flag"
+                    ]
+                }
+            }
+        })
+        .to_string();
+
+        let (updated, total, wrapped) = inject_json(
+            &original,
+            SetupClient::ClaudeDesktop,
+            "/opt/mcptracer/bin/mcptracer",
+        )
+        .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(wrapped, 1);
+
+        let value: Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(
+            value["mcpServers"]["local"]["args"],
+            serde_json::json!([
+                "record",
+                "--client",
+                "claude-desktop",
+                "--",
+                r"C:\Program Files\My Tool\server.exe",
+                "--data-dir",
+                r"C:\Program Files\Data Dir\",
+                "positional arg with spaces",
+                "--flag"
+            ])
+        );
+    }
+
+    #[test]
+    fn wrapping_a_toml_server_preserves_every_other_field_on_it() {
+        // TOML equivalent of wrapping_a_json_server_preserves_every_other_field_on_it -
+        // wrap_toml_server is separate code from wrap_json_server, so the
+        // same guarantee needs its own proof rather than an inference from
+        // the JSON path.
+        let original = r#"[mcp_servers.local]
+command = "uvx"
+args = ["server"]
+env = { TOKEN = "keep" }
+cwd = "/srv/app"
+timeout = 30
+experimental_flag = true
+"#;
+        let (updated, total, wrapped) =
+            inject_toml(original, SetupClient::Codex, "/opt/mcptracer/bin/mcptracer").unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(wrapped, 1);
+
+        let value: toml::Value = toml::from_str(&updated).unwrap();
+        let local = value["mcp_servers"]["local"].as_table().unwrap();
+        assert_eq!(local["env"]["TOKEN"].as_str(), Some("keep"));
+        assert_eq!(local["cwd"].as_str(), Some("/srv/app"));
+        assert_eq!(local["timeout"].as_integer(), Some(30));
+        assert_eq!(local["experimental_flag"].as_bool(), Some(true));
+        assert_eq!(
+            local["command"].as_str(),
+            Some("/opt/mcptracer/bin/mcptracer")
+        );
+    }
+
+    #[test]
+    fn toml_wrapping_leaves_unrelated_servers_and_top_level_keys_untouched() {
+        // TOML equivalent of json_wrapping_leaves_unrelated_servers_and_top_level_keys_untouched.
+        let original = r#"model = "gpt-5"
+
+[logging]
+level = "debug"
+
+[mcp_servers.already_wrapped]
+command = "/opt/mcptracer/bin/mcptracer"
+args = ["record", "--client", "codex", "--", "uvx", "server"]
+
+[mcp_servers.remote]
+url = "https://example.test/mcp"
+
+[mcp_servers.local]
+command = "uvx"
+args = ["server"]
+"#;
+        let before: toml::Value = toml::from_str(original).unwrap();
+        let (updated, total, wrapped) =
+            inject_toml(original, SetupClient::Codex, "/opt/mcptracer/bin/mcptracer").unwrap();
+        // `already_wrapped` and `local` have `command`; `remote` (URL-only)
+        // does not, so it never enters the stdio count.
+        assert_eq!(total, 2);
+        assert_eq!(wrapped, 1);
+
+        let after: toml::Value = toml::from_str(&updated).unwrap();
+        assert_eq!(
+            after["mcp_servers"]["already_wrapped"],
+            before["mcp_servers"]["already_wrapped"]
+        );
+        assert_eq!(
+            after["mcp_servers"]["remote"],
+            before["mcp_servers"]["remote"]
+        );
+        assert_eq!(after["model"].as_str(), Some("gpt-5"));
+        assert_eq!(after["logging"]["level"].as_str(), Some("debug"));
+    }
+
+    #[test]
+    fn toml_wrapping_preserves_paths_and_args_containing_spaces_in_order() {
+        // TOML equivalent of json_wrapping_preserves_paths_and_args_containing_spaces_in_order.
+        // TOML literal strings (single-quoted) are used here specifically
+        // because they, like the JSON path, take backslashes and spaces
+        // completely literally - no escaping to fight with in the fixture.
+        let original = r#"[mcp_servers.local]
+command = 'C:\Program Files\My Tool\server.exe'
+args = ['--data-dir', 'C:\Program Files\Data Dir\', 'positional arg with spaces', '--flag']
+"#;
+        let (updated, total, wrapped) =
+            inject_toml(original, SetupClient::Codex, "/opt/mcptracer/bin/mcptracer").unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(wrapped, 1);
+
+        let value: toml::Value = toml::from_str(&updated).unwrap();
+        let args = value["mcp_servers"]["local"]["args"].as_array().unwrap();
+        let expected = [
+            "record",
+            "--client",
+            "codex",
+            "--",
+            r"C:\Program Files\My Tool\server.exe",
+            "--data-dir",
+            r"C:\Program Files\Data Dir\",
+            "positional arg with spaces",
+            "--flag",
+        ];
+        assert_eq!(args.len(), expected.len());
+        for (actual, expected) in args.iter().zip(expected.iter()) {
+            assert_eq!(actual.as_str(), Some(*expected));
+        }
     }
 }
