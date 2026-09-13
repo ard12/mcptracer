@@ -408,6 +408,7 @@ mod tests {
     use super::{
         finish_storage_writer, record_frame, redact_server_command, reserve_capture_stamp,
         spawn_storage_writer, try_record, CaptureStamp, McpMessage, StorageQueueBudget,
+        STORAGE_QUEUE_MAX_BYTES,
     };
 
     fn message(seq: u64) -> McpMessage {
@@ -418,6 +419,42 @@ mod tests {
             payload: json!({"jsonrpc":"2.0","id":seq,"method":"initialize"}),
             payload_bytes: 48,
         }
+    }
+
+    #[test]
+    fn byte_budget_admits_exactly_the_real_cap_and_refuses_one_byte_past_it() {
+        // The other budget tests substitute small synthetic ceilings (1_500 and
+        // 4_096 bytes). That proves the mechanism but never the constant the
+        // proxy actually runs with, so an off-by-one introduced at the real
+        // limit would not be caught. Exercise STORAGE_QUEUE_MAX_BYTES itself.
+        let budget = StorageQueueBudget::new(STORAGE_QUEUE_MAX_BYTES);
+
+        // Exactly at the cap must be admitted - the cap is inclusive, so a
+        // payload sized precisely to it is valid traffic, not an overflow.
+        assert!(budget.try_reserve(STORAGE_QUEUE_MAX_BYTES));
+        assert_eq!(budget.queued_bytes(), STORAGE_QUEUE_MAX_BYTES);
+        assert!(
+            !budget.try_reserve(1),
+            "a budget reserved to its cap must refuse even a single further byte"
+        );
+
+        budget.release(STORAGE_QUEUE_MAX_BYTES);
+        assert_eq!(budget.queued_bytes(), 0);
+
+        // Just under, then the byte that lands exactly on the cap.
+        assert!(budget.try_reserve(STORAGE_QUEUE_MAX_BYTES - 1));
+        assert!(
+            budget.try_reserve(1),
+            "the final byte up to the cap must still fit"
+        );
+        assert!(!budget.try_reserve(1));
+
+        // A single reservation larger than the whole budget can never fit, and
+        // must fail rather than overflow the subtraction that computes room.
+        let fresh = StorageQueueBudget::new(STORAGE_QUEUE_MAX_BYTES);
+        assert!(!fresh.try_reserve(STORAGE_QUEUE_MAX_BYTES + 1));
+        assert!(!fresh.try_reserve(usize::MAX));
+        assert_eq!(fresh.queued_bytes(), 0);
     }
 
     #[test]

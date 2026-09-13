@@ -3884,4 +3884,8 @@ if __name__ == "__main__":
     test_export_sensitive_content_lint_aborts_on_bearer_token()
     test_export_allow_sensitive_content_overrides_abort()
     test_canonical_demos_catch_their_scenarios()
+    test_record_captures_response_that_arrives_after_client_closes_stdin()
+    test_killed_recording_leaves_database_usable_for_a_new_session()
+    test_mtrace_import_preserves_redaction_placeholder_and_policy()
+    test_record_handles_a_long_session_under_write_batching()
     print("integration test passed")

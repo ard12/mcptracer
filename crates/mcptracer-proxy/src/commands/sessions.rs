@@ -130,13 +130,7 @@ pub async fn run(args: SessionsArgs, db_path: PathBuf) -> Result<()> {
             }
 
             let total = messages.len();
-            let window = if all {
-                &messages[..]
-            } else {
-                let start = offset.min(total);
-                let end = start.saturating_add(limit).min(total);
-                &messages[start..end]
-            };
+            let window = message_window(&messages, offset, limit, all);
             report_truncation(total, window.len(), offset, all);
 
             if json {
@@ -196,6 +190,21 @@ pub async fn run(args: SessionsArgs, db_path: PathBuf) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The slice of `messages` one `sessions show` invocation should print.
+///
+/// Clamps rather than panicking. An `--offset` past the end yields an empty
+/// window instead of slicing out of bounds, and `offset + limit` saturates so a
+/// very large `--limit` cannot overflow the addition. Extracted from `run` so
+/// this arithmetic is testable on its own - inline, it had no test at all.
+fn message_window<T>(messages: &[T], offset: usize, limit: usize, all: bool) -> &[T] {
+    if all {
+        return messages;
+    }
+    let start = offset.min(messages.len());
+    let end = start.saturating_add(limit).min(messages.len());
+    &messages[start..end]
 }
 
 /// Tell the operator on **stderr** when output was windowed, so stdout stays
@@ -346,5 +355,35 @@ fn truncate(value: &str, max: usize) -> String {
         value.to_string()
     } else {
         value[..max.saturating_sub(1)].to_string() + "."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_window;
+
+    #[test]
+    fn message_window_clamps_instead_of_panicking() {
+        let items: Vec<usize> = (0..5).collect();
+        let empty: &[usize] = &[];
+
+        // Ordinary windows.
+        assert_eq!(message_window(&items, 0, 200, false), &items[..]);
+        assert_eq!(message_window(&items, 0, 2, false), &items[0..2]);
+        assert_eq!(message_window(&items, 3, 10, false), &items[3..5]);
+
+        // Offsets at and past the end must be empty, not a panic.
+        assert_eq!(message_window(&items, 5, 1, false), empty);
+        assert_eq!(message_window(&items, 99, 10, false), empty);
+
+        // A limit large enough to overflow the addition must saturate.
+        assert_eq!(message_window(&items, 2, usize::MAX, false), &items[2..5]);
+        assert_eq!(message_window(&items, usize::MAX, usize::MAX, false), empty);
+
+        // --all ignores the window entirely.
+        assert_eq!(message_window(&items, 1, 2, true), &items[..]);
+
+        // An empty session is windowable at any offset.
+        assert_eq!(message_window(empty, 3, 5, false), empty);
     }
 }

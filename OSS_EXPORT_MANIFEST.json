@@ -80,14 +80,14 @@
     "crates/mcptracer-proxy/src/commands/search.rs": "71b46e045e720da428d9cc546eb5d93ec78ab7efed9a5a74350e2fbf45933bf0",
     "crates/mcptracer-proxy/src/commands/semantic.rs": "0f6da428ce820af6855532c46661a245fb6dc8ac42e3cfb5b8e4f2f4ee1a0fdf",
     "crates/mcptracer-proxy/src/commands/serve.rs": "02cb0ab6ad1aa941ecf17f88b69bd3b07585dd3812061134a4f548f49530274e",
-    "crates/mcptracer-proxy/src/commands/sessions.rs": "5471049510d24aff0cce0d994074261946ddc1dcaaf3fa634cd8cf0f101539ea",
+    "crates/mcptracer-proxy/src/commands/sessions.rs": "24d05f2e932085c0536a42f2bdf0d6123781c053b9d36b777b0d46ac343b851d",
     "crates/mcptracer-proxy/src/commands/setup.rs": "7c502acaa8898cc8ffa60b16feb18f0ceb0b4a1f0d55b4c7f5afa5fe09696f1c",
     "crates/mcptracer-proxy/src/commands/stats.rs": "afd441c668d5acb8d703e6ee198f154bf5bd77197a85cb26ef48e5dba73741f0",
     "crates/mcptracer-proxy/src/commands/validate.rs": "9f6004562c1bf9e9cc149e9b73391ac6c54cd9dc5c4f8f9f13ace31fb7c9eb14",
     "crates/mcptracer-proxy/src/commands/verify.rs": "38ef7be5caed0681c48eabb922c25599982b3d860f9025e6bb12d958fd324949",
     "crates/mcptracer-proxy/src/main.rs": "96b41841f5058c90fe42e0f054d156da6fea1e313e7943da603e8845f150a5ba",
     "crates/mcptracer-proxy/src/session_health.rs": "8dd1a65d1c799ebaa4b7c14f966089a52c7c7c062b8e526c05c8a6ee709f8ae6",
-    "crates/mcptracer-proxy/src/session_writer.rs": "abefdda713b92614aee0924e3ead81291c2e5e64a23e90d0aed0e8fcd8c6a478",
+    "crates/mcptracer-proxy/src/session_writer.rs": "edead8563ebedc2b377d869f4a6730bfd9ee3aa1d0f2b68b35e7b1d7433516f0",
     "crates/mcptracer-proxy/src/sse.rs": "70d6af0df5e2c4ac18ab6658d1b667103b539d48e5c69bdf52b20c4394699051",
     "crates/mcptracer-redact/COMMERCIAL-LICENSE.md": "b224c8870c19c4ba77df6fdfb15027303d630b32b05153bdf36d0afd0ee3a13b",
     "crates/mcptracer-redact/Cargo.toml": "2827dfda854fc18d562b68742c9d9543dc5df0057e2dc1d334158f81b28897fe",
@@ -239,7 +239,7 @@
     "tests/fake_mcp_http_server.py": "0458d6a13029d3744260197dfb984f55c13861e2025babcfa0c8b5dcc4c9062e",
     "tests/fake_mcp_server.py": "8c90609594c456a8ddb659e36143010c1b49e904813fc25f2985eb2b9f2c1525",
     "tests/schema_validator.py": "7ab50a2626c005df2cb7ba3891efca69586aa78fce83bf16d8db592b6174b97a",
-    "tests/test_proxy_integration.py": "f71342dce9323dc834d14c83b00c9ea1506275108c2a65593af0c4747a4b3205",
+    "tests/test_proxy_integration.py": "5c6954965c869f78075c4dbae7e85626f96bbc87cb4e6b280568260a8f560db7",
     "tests/test_verify_oss_export.py": "42e51ebb751053c875629848ab28b1ca66c1bd01834f9b314afeb6a6b938a99f",
     "tests/test_verify_public_cutover.py": "60daac6627ceaa161977ff828ea5f81de2483f5fe6c260a61357e38f9e7eb929"
   },
@@ -274,7 +274,7 @@
     "docs-site/src/architecture/intelligence-layer.md",
     "docs-site/src/architecture/phase1.md"
   ],
-  "source_commit": "9741218835eec5c8155c973e5bac086d9134baa5",
+  "source_commit": "dd81e415689d62b748032181ddd76324d51465b2",
   "source_policy_sha256": "ea5598816ae570b06b3afc631ef926bf3c38db1d11dd04fc7bbd07b11d84a3ad",
   "unhashed_generated_files": [
     "OSS_EXPORT_MANIFEST.json"
