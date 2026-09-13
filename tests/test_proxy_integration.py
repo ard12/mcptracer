@@ -3840,8 +3840,372 @@ def test_canonical_demos_catch_their_scenarios() -> None:
     assert b"search never exceeds 100ms" in slow_check.stdout
 
 
+def test_record_captures_response_that_arrives_after_client_closes_stdin() -> None:
+    """Gap: no test covers the client closing stdin while the server is still
+    working -- the ordinary editor-shutdown path. `record` deliberately keeps
+    draining the server for up to CLIENT_EOF_DRAIN_GRACE (30s, in
+    commands/record.rs) after client EOF so a final in-flight response is
+    still captured; this proves that grace actually captures trailing
+    output, not just that the process exits cleanly.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    workdir = make_workdir(repo)
+    db_path = workdir / "sessions.db"
+
+    # Reads exactly one request, sleeps briefly -- comfortably inside the 30s
+    # drain grace, far outside any race window -- then answers and exits, as
+    # a server still finishing work when its client hangs up would.
+    server = workdir / "slow_reply_then_exit.py"
+    server.write_text(
+        "import sys\n"
+        "import time\n"
+        "sys.stdin.readline()\n"
+        "time.sleep(1)\n"
+        'sys.stdout.write(\'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\\n\')\n'
+        "sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    stdin = frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+
+    proc = subprocess.run(
+        [
+            "cargo", "run", "--quiet", "--bin", "mcptracer", "--",
+            "--db", str(db_path),
+            "record", "--client", "eof-drain-test", "--",
+            sys.executable, str(server),
+        ],
+        # subprocess.run's `input` writes the full payload then closes our
+        # stdin, exactly like a client shutting down after its last request.
+        input=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
+    responses = parse_frames(proc.stdout)
+    assert len(responses) == 1, responses
+    assert responses[0]["result"] == {"ok": True}, responses
+
+    conn = sqlite3.connect(db_path)
+    session_id, ended_at = conn.execute("SELECT id, ended_at FROM sessions").fetchone()
+    rows = conn.execute(
+        "SELECT direction, method FROM messages WHERE session_id = ? ORDER BY seq",
+        (session_id,),
+    ).fetchall()
+    conn.close()
+    assert ended_at is not None, "session was left open despite the server answering before exit"
+    assert rows == [("c2s", "initialize"), ("s2c", None)], rows
+
+    validated = subprocess.run(
+        [
+            "cargo", "run", "--quiet", "--bin", "mcptracer", "--",
+            "--db", str(db_path), "validate", session_id, "--json",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=60,
+        check=False,
+    )
+    assert validated.returncode == 0, validated.stderr.decode("utf-8", errors="replace")
+    report = json.loads(validated.stdout)
+    assert report["healthy"] is True, report
 
 
+def test_killed_recording_leaves_database_usable_for_a_new_session() -> None:
+    """Gap: nothing covers reopening a database after `record` was killed
+    mid-session. The abandoned session must be flagged unhealthy on its own
+    terms, but -- the part that actually matters to a user whose editor
+    crashed -- one abandoned session must not poison the (WAL-mode) database
+    file for the next, unrelated recording.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    workdir = make_workdir(repo)
+    db_path = workdir / "sessions.db"
+    fake_server = repo / "tests" / "fake_mcp_server.py"
+
+    # Invoke the compiled binary directly (not `cargo run`) so killing the
+    # process we hold actually kills the process recording the session,
+    # rather than just the cargo wrapper around it.
+    binary_name = "mcptracer.exe" if os.name == "nt" else "mcptracer"
+    binary = repo / "target" / "debug" / binary_name
+    if not binary.exists():
+        build = subprocess.run(
+            ["cargo", "build", "--quiet", "--bin", "mcptracer"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=repo,
+            timeout=180,
+            check=False,
+        )
+        assert build.returncode == 0, build.stderr.decode("utf-8", errors="replace")
+
+    killed = subprocess.Popen(
+        [
+            str(binary),
+            "--db", str(db_path),
+            "record", "--client", "killed-test", "--",
+            sys.executable, str(fake_server),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+    )
+    try:
+        assert killed.stdin is not None and killed.stdout is not None
+        killed.stdin.write(frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
+        killed.stdin.flush()
+        # Proves the session is live -- a request really was forwarded and
+        # answered -- before the rug gets pulled out from under it.
+        assert killed.stdout.readline().strip(), "no response forwarded before kill"
+        killed.kill()
+        killed.wait(timeout=10)
+    finally:
+        if killed.stdin is not None:
+            killed.stdin.close()
+        if killed.stdout is not None:
+            killed.stdout.close()
+        if killed.stderr is not None:
+            killed.stderr.close()
+
+    conn = sqlite3.connect(db_path)
+    (killed_session_id,) = conn.execute("SELECT id FROM sessions").fetchone()
+    conn.close()
+
+    validated = subprocess.run(
+        [str(binary), "--db", str(db_path), "validate", killed_session_id, "--json"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=60,
+        check=False,
+    )
+    assert validated.returncode == 1, (
+        validated.stdout.decode("utf-8", errors="replace")
+        + validated.stderr.decode("utf-8", errors="replace")
+    )
+    report = json.loads(validated.stdout)
+    assert report["healthy"] is False, report
+    assert any(issue["kind"] == "session_not_closed" for issue in report["issues"]), report
+
+    # The part that actually matters: a fresh recording against the very
+    # same database file must succeed and be healthy, unaffected by the
+    # abandoned session left behind above.
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"message": "still works"}},
+        },
+    ]
+    stdin = b"".join(frame(message) for message in messages)
+    second = subprocess.run(
+        [
+            "cargo", "run", "--quiet", "--bin", "mcptracer", "--",
+            "--db", str(db_path),
+            "record", "--client", "after-kill-test", "--",
+            sys.executable, str(fake_server),
+        ],
+        input=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=60,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr.decode("utf-8", errors="replace")
+
+    conn = sqlite3.connect(db_path)
+    (second_session_id,) = conn.execute(
+        "SELECT id FROM sessions WHERE client = ?", ("after-kill-test",)
+    ).fetchone()
+    conn.close()
+
+    healthy = subprocess.run(
+        [str(binary), "--db", str(db_path), "validate", second_session_id, "--json"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=60,
+        check=False,
+    )
+    assert healthy.returncode == 0, (
+        healthy.stdout.decode("utf-8", errors="replace")
+        + healthy.stderr.decode("utf-8", errors="replace")
+    )
+    healthy_report = json.loads(healthy.stdout)
+    assert healthy_report["healthy"] is True, healthy_report
+
+
+def test_mtrace_import_preserves_redaction_placeholder_and_policy() -> None:
+    """Gap: test_mtrace_export_import_round_trip never mentions redaction, so
+    nothing asserts that masked values and the redaction policy itself
+    survive an export/import round trip into a *different* database file --
+    the artifact-sharing path this exists for.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    workdir = make_workdir(repo)
+    source_db = workdir / "source.db"
+    imported_db = workdir / "imported.db"
+    artifact = workdir / "session.mtrace"
+    fake_server = repo / "tests" / "fake_mcp_server.py"
+    secret = "sk-do-not-leak-this-secret"
+
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"message": "hi", "api_key": secret}},
+        },
+    ]
+    stdin = b"".join(frame(message) for message in messages)
+
+    def mcptracer(
+        db_path: Path, *args: str, input_bytes: bytes | None = None
+    ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["cargo", "run", "--quiet", "--bin", "mcptracer", "--", "--db", str(db_path), *args],
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=repo,
+            timeout=60,
+            check=False,
+        )
+
+    record = mcptracer(
+        source_db,
+        "record", "--client", "redact-roundtrip", "--redact", "default", "--",
+        sys.executable, str(fake_server),
+        input_bytes=stdin,
+    )
+    assert record.returncode == 0, record.stderr.decode("utf-8", errors="replace")
+
+    conn = sqlite3.connect(source_db)
+    (source_id,) = conn.execute("SELECT id FROM sessions").fetchone()
+    conn.close()
+
+    exported = mcptracer(source_db, "export", source_id, "--out", str(artifact))
+    assert exported.returncode == 0, exported.stderr.decode("utf-8", errors="replace")
+
+    imported = mcptracer(imported_db, "import", str(artifact), "--strict")
+    assert imported.returncode == 0, imported.stderr.decode("utf-8", errors="replace")
+
+    conn = sqlite3.connect(imported_db)
+    imported_id, redaction_policy, redaction_keys_json = conn.execute(
+        "SELECT id, redaction_policy, redaction_keys FROM sessions"
+    ).fetchone()
+    payloads = [
+        row[0]
+        for row in conn.execute(
+            "SELECT payload FROM messages WHERE session_id = ?", (imported_id,)
+        ).fetchall()
+    ]
+    conn.close()
+
+    # The policy itself must survive import, not silently reset to the
+    # database's own default ("none").
+    assert redaction_policy == "default", redaction_policy
+    assert json.loads(redaction_keys_json) == [], redaction_keys_json
+
+    assert payloads, "expected a recorded tools/call message"
+    assert any('"api_key":"***REDACTED***"' in payload for payload in payloads), payloads
+    assert all(secret not in payload for payload in payloads), "secret leaked into imported db"
+
+
+def test_record_handles_a_long_session_under_write_batching() -> None:
+    """Gap: every fixture elsewhere is 4-6 messages, so the 128-message
+    storage write batch (STORAGE_WRITE_BATCH_MESSAGES) and the 4096-slot
+    channel have never run under load. 2,000 request/response pairs (4,000
+    messages) push well past both. Ordering under batching is the property
+    at risk, so `seq` is checked for completeness and strict monotonicity,
+    not just message count.
+
+    2,000 was chosen because each round trip is pure local-pipe I/O with no
+    real work on either side, so the added cost over a tiny fixture is just
+    the batching/channel path itself -- a few seconds, not minutes. See the
+    printed timing in the test output for the actual measured runtime.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    workdir = make_workdir(repo)
+    db_path = workdir / "sessions.db"
+
+    message_count = 2000
+
+    # A minimal, immediate echo: no per-message work beyond a JSON round
+    # trip, so the test's runtime reflects mcptracer's batching path rather
+    # than fixture overhead.
+    server = workdir / "fast_echo_server.py"
+    server.write_text(
+        "import json\n"
+        "import sys\n"
+        "for line in sys.stdin:\n"
+        "    line = line.strip()\n"
+        "    if not line:\n"
+        "        continue\n"
+        "    msg = json.loads(line)\n"
+        "    resp = {'jsonrpc': '2.0', 'id': msg['id'], 'result': {'n': msg['id']}}\n"
+        "    sys.stdout.write(json.dumps(resp, separators=(',', ':')) + '\\n')\n"
+        "    sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    messages = [
+        {"jsonrpc": "2.0", "id": i, "method": "ping", "params": {}}
+        for i in range(message_count)
+    ]
+    stdin = b"".join(frame(message) for message in messages)
+
+    start = time.monotonic()
+    proc = subprocess.run(
+        [
+            "cargo", "run", "--quiet", "--bin", "mcptracer", "--",
+            "--db", str(db_path),
+            "record", "--client", "long-session-test", "--",
+            sys.executable, str(server),
+        ],
+        input=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=180,
+        check=False,
+    )
+    elapsed = time.monotonic() - start
+
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
+    responses = parse_frames(proc.stdout)
+    assert len(responses) == message_count, len(responses)
+    for i, response in enumerate(responses):
+        assert response["id"] == i and response["result"]["n"] == i, response
+
+    conn = sqlite3.connect(db_path)
+    session_id, total_messages, dropped_messages = conn.execute(
+        "SELECT id, total_messages, dropped_messages FROM sessions"
+    ).fetchone()
+    seqs = [
+        row[0]
+        for row in conn.execute(
+            "SELECT seq FROM messages WHERE session_id = ? ORDER BY seq", (session_id,)
+        ).fetchall()
+    ]
+    conn.close()
+
+    expected_total = message_count * 2
+    assert dropped_messages == 0, dropped_messages
+    assert total_messages == expected_total, total_messages
+    assert len(seqs) == expected_total, len(seqs)
+    assert seqs == list(range(expected_total)), "sequence has gaps or is out of order"
+
+    print(f"[long-session] {expected_total} messages recorded in {elapsed:.1f}s", file=sys.stderr)
 
 
 if __name__ == "__main__":
