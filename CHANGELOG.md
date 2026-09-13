@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased public source preview (`0.3.0-rc1` candidate)
+## 0.3.0-rc1 — public prerelease
 
-This generated tree is a pre-1.0 source candidate, not evidence that packages,
-binary archives, a Homebrew tap, npm/PyPI wrappers, or a GitHub Release exist.
+This generated tree is a pre-1.0 candidate. Prebuilt binaries for it are
+published as the `v0.3.0-rc1` GitHub prerelease; packages, a Homebrew tap, npm/PyPI
+wrappers, and a released GitHub Action still do not exist.
 Its authoritative source revision is recorded in
 `OSS_EXPORT_MANIFEST.json`.
 

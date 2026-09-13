@@ -1,7 +1,33 @@
 # Installation
 
-This is a pre-1.0 public source preview. No package, binary archive, Homebrew
-tap, npm package, PyPI package, or released GitHub Action is claimed.
+This is a pre-1.0 preview. Prebuilt binaries are published as a **prerelease**
+(`v0.3.0-rc1`) for Linux (x86_64, ARM64), macOS (Intel, Apple Silicon), and Windows
+(x86_64). No package-manager install exists yet: npm, PyPI, crates.io, Homebrew,
+and a released GitHub Action are all unpublished.
+
+## Install the prebuilt preview
+
+GitHub's latest-release endpoint deliberately excludes prereleases, so pin the
+version explicitly. On macOS and Linux the variable must sit to the **right** of
+the pipe, attached to `bash`; on the left it would be set for `curl` instead and
+the installer would never see it.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ard12/mcptracer/main/scripts/install.sh | MCPTRACER_VERSION=v0.3.0-rc1 bash
+```
+
+```powershell
+$env:MCPTRACER_VERSION = "v0.3.0-rc1"; irm https://raw.githubusercontent.com/ard12/mcptracer/main/scripts/install.ps1 | iex
+```
+
+Both installers verify the archive's SHA-256 before extracting and confirm the
+installed binary actually runs. To check build provenance yourself:
+
+```bash
+gh attestation verify mcptracer-v0.3.0-rc1-<target>.tar.gz --owner ard12
+```
+
+## Build from source
 
 Build the checked-out revision from source:
 

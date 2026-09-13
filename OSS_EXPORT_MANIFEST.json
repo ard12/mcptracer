@@ -12,7 +12,7 @@
     ".github/workflows/release.yml": "dff8af33f11cef860accb19c662b71d7f965a5bc28a23f62f10a26c9fcd47b14",
     ".gitignore": "9fb200cbd44ef1d8740b4eb518ffc52d53356087db94a93e1abcb2ec052649d5",
     "ABOUT.md": "fb4df9d00a83b24c975cdcb2883407751f1749a1c6ce665319e5aa9963e10ee3",
-    "CHANGELOG.md": "5aa48e72f75a55d77471cc7f8381c7eab6f89aebbb782c3abf8e48529d4ac044",
+    "CHANGELOG.md": "e3fb9d83531ac86a078d279397d872200bb693a3e103810405c005b2352fa9fa",
     "CODE_OF_CONDUCT.md": "8d6462309cb08382c73e31121a4efeda1728388bd159637bb12efa052ba4ac11",
     "COMMERCIAL-LICENSE.md": "b224c8870c19c4ba77df6fdfb15027303d630b32b05153bdf36d0afd0ee3a13b",
     "CONTRIBUTING.md": "e5ef023a959376a36d4bfcd7f00a6a24423db9c048660d02d95fabdbbf037904",
@@ -21,7 +21,7 @@
     "LICENSE": "0e7409c420bd7d09b24b918f463d5469e2a04f1933ae73a1ce0cef6e9d57bb87",
     "NOTICE": "0473d8dbff728a1b467f6fd1e52b3e74c9b19ca64d92587a636431463713649e",
     "PUBLIC_EXPORT.md": "c9ad94c30e8562eaceaf618cc47a8c5b4abfac3394f3da5ffc5087f762e87218",
-    "README.md": "15fa10d9cfc0167def69562a41ac773be5b6337b3a9cf22ef806a12529b61a0b",
+    "README.md": "337fe744b8cda2e7374c7cbc9a7ed0150f1043c7c2c0b062010f441dbe031979",
     "SECURITY.md": "92d4ee96933611d5a283f8d2c8d895f9aed8f112f3fc9d54f8d28ccf02107d7d",
     "crates/mcptracer-intel/COMMERCIAL-LICENSE.md": "b224c8870c19c4ba77df6fdfb15027303d630b32b05153bdf36d0afd0ee3a13b",
     "crates/mcptracer-intel/Cargo.toml": "d63cf21545cb29c7f829e6563c9650591e9674c96598eebfa37ede1b52893625",
@@ -112,7 +112,7 @@
     "docs-site/src/guide/recording.md": "11cbda47f00c3a3b59e07146eb90405306382210ae64fc20bf6ca1046f507cfe",
     "docs-site/src/guide/redaction.md": "0780bf6ffe5bd5269c68f48c5f7043285215fd7f3716c0886adcca5be0a2f432",
     "docs-site/src/guide/sessions.md": "e2bb3e51e15f256e1337723dc1b06527f3994e9022a80b75982ba5ec38fa99a3",
-    "docs-site/src/installation.md": "a7344da3ba442d31aa288f33c23debb2f563cd292abf67a27be20d6c5d187573",
+    "docs-site/src/installation.md": "48f72607b9ddf654982e3a2b10b323b1f39fb56f34b4efe31710f4938f1b45ff",
     "docs-site/src/intelligence/index.md": "64dc1af0290d246d9d035e1b9ddc58ca81d1137e9a278c537f7e4831613c0478",
     "docs-site/src/introduction.md": "997a1e5830ee6a581ce61e3ece5cdc8e007755baad762846eacd744fd9487db2",
     "docs-site/src/licensing.md": "01a1edd0e31d02f8c60bc5c159198fef046b461c2f2455886add190886125aaf",
@@ -274,7 +274,7 @@
     "docs-site/src/architecture/intelligence-layer.md",
     "docs-site/src/architecture/phase1.md"
   ],
-  "source_commit": "d4e8e69347ac183f1430f5ef78932c5649f7ebca",
+  "source_commit": "9741218835eec5c8155c973e5bac086d9134baa5",
   "source_policy_sha256": "ea5598816ae570b06b3afc631ef926bf3c38db1d11dd04fc7bbd07b11d84a3ad",
   "unhashed_generated_files": [
     "OSS_EXPORT_MANIFEST.json"

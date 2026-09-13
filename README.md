@@ -18,8 +18,8 @@ regressions fail CI, and keep the recorded evidence locally.
 [Contribute](CONTRIBUTING.md) · [About](ABOUT.md)
 
 > **Noncommercial source preview · pre-1.0.** Commercial use requires written
-> permission from ard12. See [licensing](COMMERCIAL-LICENSE.md). Published binary releases,
-> package-manager installs, and a released GitHub Action are not yet advertised.
+> permission from ard12. See [licensing](COMMERCIAL-LICENSE.md). Prebuilt binaries are
+> available as a prerelease; package-manager installs and a released GitHub Action are not yet advertised.
 
 ## Who is this for?
 
@@ -56,9 +56,20 @@ stored responses without contacting that target.
 
 ## Quick start
 
-Requires **Rust 1.85+** and a C toolchain for bundled SQLite. On Windows,
-install the MSVC Build Tools and Windows SDK. The demo also needs Python 3.10+
-and Bash (Git Bash works on Windows).
+**Prebuilt preview — no Rust toolchain needed.** Binaries for Linux, macOS, and
+Windows are published as the `v0.3.0-rc1` prerelease:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ard12/mcptracer/main/scripts/install.sh | MCPTRACER_VERSION=v0.3.0-rc1 bash
+```
+
+For the Windows PowerShell command and provenance verification, see
+[Installation](docs-site/src/installation.md). The demo below still needs a
+checkout of this repository, since it ships in `examples/`.
+
+**From source.** Requires **Rust 1.85+** and a C toolchain for bundled SQLite. On
+Windows, install the MSVC Build Tools and Windows SDK. The demo also needs
+Python 3.10+ and Bash (Git Bash works on Windows).
 
 ```bash
 git clone https://github.com/ard12/mcptracer.git
