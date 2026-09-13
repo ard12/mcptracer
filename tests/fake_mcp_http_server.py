@@ -320,6 +320,12 @@ class Handler(BaseHTTPRequestHandler):
         # id in a single response event so the resulting recording
         # correlates cleanly (no unanswered/orphan exchange) and is eligible
         # for `require_healthy_session`-gated commands like `replay-http`.
+        #
+        # The write is split with a short pause in the middle, like `_send_sse`
+        # below, so a concurrent plain-JSON response on another connection has
+        # a real window to complete while this one is still streaming - this
+        # is what lets a concurrency test assert genuine interleaving rather
+        # than two responses that merely happened to be requested close together.
         event = json.dumps(
             {"jsonrpc": "2.0", "id": request_id, "result": {"ok": True}},
             separators=(",", ":"),
@@ -330,7 +336,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(events)))
         self.send_header("Mcp-Session-Id", "upstream-session")
         self.end_headers()
-        self.wfile.write(events)
+        midpoint = len(events) // 2
+        self.wfile.write(events[:midpoint])
+        self.wfile.flush()
+        time.sleep(0.02)
+        self.wfile.write(events[midpoint:])
         self.wfile.flush()
 
     def _send_sse(self) -> None:

@@ -300,16 +300,22 @@ async fn proxy_client_to_server(
             Ok(0) => return Ok(()),
             Ok(n) => {
                 buf.extend_from_slice(&tmp[..n]);
-                if !drain_frames(
-                    &mut buf,
-                    Direction::ClientToServer,
-                    &mut server_stdin,
-                    &storage_tx,
-                    &seq,
-                    &dropped_messages,
-                    &queue_budget,
-                )
-                .await
+                // `drain_frames` leaves no newline behind, so a chunk without one
+                // cannot complete a frame. Skipping the scan then keeps a large
+                // frame linear: rescanning the whole buffer on every 4 KiB read
+                // made an 8 MiB frame take about 25 seconds to relay.
+                let may_complete_a_frame = tmp[..n].contains(&b'\n');
+                if may_complete_a_frame
+                    && !drain_frames(
+                        &mut buf,
+                        Direction::ClientToServer,
+                        &mut server_stdin,
+                        &storage_tx,
+                        &seq,
+                        &dropped_messages,
+                        &queue_budget,
+                    )
+                    .await
                 {
                     return Err(anyhow!("client-to-server forwarding stopped"));
                 }
@@ -347,16 +353,20 @@ async fn proxy_server_to_client(
             Ok(0) => return Ok(()),
             Ok(n) => {
                 buf.extend_from_slice(&tmp[..n]);
-                if !drain_frames(
-                    &mut buf,
-                    Direction::ServerToClient,
-                    &mut proxy_stdout,
-                    &storage_tx,
-                    &seq,
-                    &dropped_messages,
-                    &queue_budget,
-                )
-                .await
+                // See `proxy_client_to_server`: only a chunk with a newline can
+                // complete a frame.
+                let may_complete_a_frame = tmp[..n].contains(&b'\n');
+                if may_complete_a_frame
+                    && !drain_frames(
+                        &mut buf,
+                        Direction::ServerToClient,
+                        &mut proxy_stdout,
+                        &storage_tx,
+                        &seq,
+                        &dropped_messages,
+                        &queue_budget,
+                    )
+                    .await
                 {
                     return Err(anyhow!("server-to-client forwarding stopped"));
                 }

@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -2567,6 +2568,65 @@ def test_oversized_unterminated_frame_is_capped() -> None:
     assert sessions[0][1] is not None, "oversized-frame session was left unclosed"
 
 
+def test_record_relays_a_large_frame_in_both_directions_in_linear_time() -> None:
+    """Regression test: each 4 KiB read rescanned the whole buffered frame for
+    a newline, so relaying one frame was quadratic in its size - about 25
+    seconds for 8 MiB. A base64 image or large file read is exactly this
+    shape, and the MCP client waited the whole time for its response.
+
+    A ~7 MiB request and a ~7 MiB response, both under the cap, must be
+    forwarded byte for byte and recorded, well inside the old running time.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    binary = build_recorder_binary(repo)
+    workdir = make_workdir(repo)
+    db_path = workdir / "sessions.db"
+    blob_len = 7 * 1024 * 1024
+
+    server = workdir / "large_echo_server.py"
+    server.write_text(
+        "import json, sys\n"
+        "request = json.loads(sys.stdin.readline())\n"
+        "blob = request['params']['blob']\n"
+        "response = {'jsonrpc': '2.0', 'id': request['id'], 'result': {'blob': blob[::-1]}}\n"
+        "sys.stdout.write(json.dumps(response, separators=(',', ':')) + '\\n')\n"
+        "sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    blob = ("ab" * (blob_len // 2 + 1))[:blob_len - 1] + "z"
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"blob": blob}}
+
+    started = time.monotonic()
+    proc = subprocess.run(
+        [
+            str(binary), "--db", str(db_path),
+            "record", "--client", "large-frame-test", "--",
+            sys.executable, str(server),
+        ],
+        input=frame(request),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=120,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
+    responses = parse_frames(proc.stdout)
+    assert len(responses) == 1
+    assert responses[0]["result"]["blob"] == blob[::-1], "the large response was not relayed intact"
+    # Debug builds on slow CI runners included; the quadratic scan took ~25s.
+    assert elapsed < 10, f"relaying two ~7 MiB frames took {elapsed:.1f}s"
+
+    conn = sqlite3.connect(db_path)
+    stored = conn.execute("SELECT direction, payload FROM messages ORDER BY seq").fetchall()
+    conn.close()
+    assert [direction for direction, _ in stored] == ["c2s", "s2c"], [d for d, _ in stored]
+    assert json.loads(stored[0][1])["params"]["blob"] == blob
+    assert json.loads(stored[1][1])["result"]["blob"] == blob[::-1]
+
+
 def test_record_exits_when_the_server_exits_while_client_stdin_stays_open() -> None:
     """A wrapped server that exits must not strand the MCP client.
 
@@ -2642,6 +2702,198 @@ def test_record_exits_when_the_server_exits_while_client_stdin_stays_open() -> N
     conn.close()
     assert ended_at is not None, "session was left open after the server exited"
     assert messages == [("c2s", "initialize"), ("s2c", None)], messages
+
+
+def test_record_drops_a_truncated_frame_when_the_server_dies_mid_write() -> None:
+    """Gap: a server that dies after writing a partial JSON-RPC line (no
+    trailing newline) was never exercised. `drain_frames` only recognizes a
+    complete frame once its newline arrives, so a truncated tail sits in the
+    read buffer and is silently discarded, not forwarded and not recorded,
+    when the server's stdout then hits EOF.
+
+    This asserts the actual current behavior: prompt exit with the server's
+    own (successful) status, the session still finalized, the earlier
+    complete exchange preserved, the truncated frame counted neither as
+    forwarded nor as a stored message, and -- critically for
+    forward-before-record -- the partial bytes never reaching the client's
+    stdout, since forwarding only ever happens for a complete frame.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    workdir = make_workdir(repo)
+    db_path = workdir / "sessions.db"
+
+    # Answers the first request in full, then writes an unterminated partial
+    # second frame and exits -- standing in for a server that crashes or is
+    # killed mid-write.
+    server = workdir / "dies_mid_frame.py"
+    server.write_text(
+        "import sys\n"
+        "sys.stdin.readline()\n"
+        'sys.stdout.write(\'{"jsonrpc":"2.0","id":1,"result":{}}\\n\')\n'
+        "sys.stdout.flush()\n"
+        # No trailing newline, and no flush-then-close race: write+flush,
+        # then exit immediately so the partial write lands before EOF.
+        'sys.stdout.write(\'{"jsonrpc":"2.0","id":2,"result":{"truncated\')\n'
+        "sys.stdout.flush()\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.Popen(
+        [
+            "cargo", "run", "--quiet", "--bin", "mcptracer", "--",
+            "--db", str(db_path),
+            "record", "--client", "mid-frame-test", "--",
+            sys.executable, str(server),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+    )
+    try:
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
+        proc.stdin.flush()
+
+        # Client stdin deliberately stays open: only the server's exit (and
+        # its truncated final write) can end this recording.
+        proc.wait(timeout=60)
+        forwarded = proc.stdout.read()
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("mcptracer record did not exit after the server died mid-frame")
+    finally:
+        if proc.stdin is not None:
+            proc.stdin.close()
+        stderr_text = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+        proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+
+    # The server exited 0 (it chose to stop, it did not crash), so the
+    # recorder reports the same clean exit -- a truncated write on the way
+    # out is not, by itself, a server failure.
+    assert proc.returncode == 0, stderr_text
+    assert "session" in stderr_text and "ended" in stderr_text, stderr_text
+
+    # Only the complete first response ever reached the client: the partial
+    # second frame has no terminating newline, so drain_frames never forwards
+    # it, no matter how the server's stdout pipe closes. Compared structurally
+    # rather than byte-for-byte: the fake server's own Python stdout is
+    # opened in text mode, so it writes "\r\n" line endings on Windows.
+    assert b"truncated" not in forwarded, forwarded
+    assert parse_frames(forwarded) == [{"jsonrpc": "2.0", "id": 1, "result": {}}], forwarded
+
+    conn = sqlite3.connect(db_path)
+    total_messages, dropped_messages, ended_at = conn.execute(
+        "SELECT total_messages, dropped_messages, ended_at FROM sessions"
+    ).fetchone()
+    messages = conn.execute(
+        "SELECT direction, method FROM messages ORDER BY seq"
+    ).fetchall()
+    conn.close()
+
+    # The session is finalized despite the truncated tail, and the earlier
+    # complete exchange is preserved intact.
+    assert ended_at is not None, "session was left open after the server died mid-frame"
+    assert messages == [("c2s", "initialize"), ("s2c", None)], messages
+    assert total_messages == 2, total_messages
+
+    # The truncated frame is dropped rather than recorded -- but, unlike a
+    # complete non-JSON frame (which is forwarded and so must count as a
+    # recording loss), a frame that never even completes is not counted in
+    # dropped_messages either. It is bytes that were read from the server and
+    # then discarded without a trace in the session's own accounting.
+    assert dropped_messages == 0, dropped_messages
+
+
+def test_record_drops_a_truncated_frame_when_the_client_closes_stdin_mid_write() -> None:
+    """The symmetric case: the client, not the server, writes a partial
+    JSON-RPC line with no trailing newline and then closes its stdin. The
+    same buffering applies in the other direction -- the truncated request is
+    never forwarded to the wrapped server -- and the server seeing EOF right
+    behind it ends the recording promptly rather than sitting out the
+    30-second `CLIENT_EOF_DRAIN_GRACE`.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    workdir = make_workdir(repo)
+    db_path = workdir / "sessions.db"
+
+    # A plain line-oriented echo server. If the truncated second request were
+    # ever forwarded, Python's line iteration still yields an unterminated
+    # final line at EOF, and `json.loads` on it would raise, crashing the
+    # server with a non-zero exit that `record` would surface as its own
+    # failure -- making a wrongly-forwarded partial frame observable here.
+    server = workdir / "echo_server.py"
+    server.write_text(
+        "import json\n"
+        "import sys\n"
+        "for line in sys.stdin:\n"
+        "    line = line.strip()\n"
+        "    if not line:\n"
+        "        continue\n"
+        "    msg = json.loads(line)\n"
+        "    resp = {'jsonrpc': '2.0', 'id': msg['id'], 'result': {}}\n"
+        "    sys.stdout.write(json.dumps(resp, separators=(',', ':')) + '\\n')\n"
+        "    sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.Popen(
+        [
+            "cargo", "run", "--quiet", "--bin", "mcptracer", "--",
+            "--db", str(db_path),
+            "record", "--client", "client-mid-frame-test", "--",
+            sys.executable, str(server),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+    )
+    try:
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
+        proc.stdin.flush()
+        assert proc.stdout.readline().strip(), "no response forwarded from the server"
+
+        # A truncated second request, then EOF -- no newline ever follows.
+        proc.stdin.write(b'{"jsonrpc":"2.0","id":2,"method":"trunc')
+        proc.stdin.close()
+
+        # A well-behaved server closes right behind the client, so this must
+        # not take anywhere near the 30s drain grace.
+        started = time.monotonic()
+        proc.wait(timeout=15)
+        elapsed = time.monotonic() - started
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("mcptracer record did not exit after the client died mid-frame")
+    finally:
+        stderr_text = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+        proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+
+    # A crashed echo server (from receiving the truncated fragment) would
+    # have made this a failed recording; a clean 0 proves it never arrived.
+    assert proc.returncode == 0, stderr_text
+    assert elapsed < 10, f"took {elapsed:.1f}s; the drain grace should not have been needed"
+
+    conn = sqlite3.connect(db_path)
+    total_messages, dropped_messages, ended_at = conn.execute(
+        "SELECT total_messages, dropped_messages, ended_at FROM sessions"
+    ).fetchone()
+    messages = conn.execute(
+        "SELECT direction, method FROM messages ORDER BY seq"
+    ).fetchall()
+    conn.close()
+
+    assert ended_at is not None, "session was left open after the client died mid-frame"
+    assert messages == [("c2s", "initialize"), ("s2c", None)], messages
+    assert total_messages == 2, total_messages
+    assert dropped_messages == 0, dropped_messages
 
 
 def test_streamable_http_proxy_records_json_and_sse() -> None:
@@ -4512,6 +4764,500 @@ def test_second_stop_signal_skips_the_reap_grace() -> None:
     assert not process_is_running(recording.server_pid), "the stubborn server was left running"
 
 
+PID_PROBE_SERVER = """\
+import sys
+with open(sys.argv[1], "w", encoding="utf-8") as pid_file:
+    pid_file.write(str(__import__("os").getpid()))
+sys.stdin.readline()
+sys.stdin.read()
+"""
+
+
+def start_pid_probe_recording(
+    repo: Path, binary: Path, db_path: Path, workdir: Path, client: str
+) -> tuple[subprocess.Popen, Path]:
+    """Launch `record` wrapping a server that only records its own pid then
+    blocks forever on stdin. Used to prove a `Store::open` failure does not
+    orphan the wrapped MCP server process."""
+    server = workdir / "pid_probe.py"
+    server.write_text(PID_PROBE_SERVER, encoding="utf-8")
+    pid_path = workdir / "server.pid"
+    proc = subprocess.Popen(
+        [
+            str(binary),
+            "--db", str(db_path),
+            "record", "--client", client, "--",
+            sys.executable, str(server), str(pid_path),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+    )
+    return proc, pid_path
+
+
+def test_record_rejects_a_corrupt_database_without_touching_it() -> None:
+    """Gap: nothing covers `--db` pointing at a file that is not a SQLite
+    database at all (garbage bytes, or a truncated real one). `record` must
+    fail fast with a clear error, non-zero exit, and must not overwrite or
+    otherwise modify the file -- there may be a real (if unreadable) database
+    behind it that a destructive "fix" would destroy. It also must not orphan
+    the MCP server process it already spawned before `Store::open` failed.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    binary = build_recorder_binary(repo)
+    workdir = make_workdir(repo)
+    db_path = workdir / "corrupt.db"
+    db_path.write_bytes(os.urandom(4096))
+    before = db_path.read_bytes()
+
+    proc, pid_path = start_pid_probe_recording(repo, binary, db_path, workdir, "corrupt-db-test")
+    try:
+        returncode = proc.wait(timeout=15)
+        stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+    finally:
+        stop_process(proc)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+
+    assert returncode != 0, stderr
+    assert "not a database" in stderr.lower(), stderr
+    assert db_path.read_bytes() == before, "a corrupt database file must not be modified"
+    # The server process was spawned before the failed `Store::open`, but a
+    # corrupt file is detected in microseconds -- fast enough that the probe
+    # may never be scheduled long enough to write its own pid file before
+    # being killed. That absence is itself a (stronger) pass: if it did start,
+    # it must not still be running now.
+    if pid_path.exists():
+        server_pid = int(pid_path.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 5
+        while process_is_running(server_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not process_is_running(server_pid), "corrupt database failure orphaned the MCP server"
+
+
+def test_record_rejects_a_directory_as_the_database_path() -> None:
+    """Gap: `--db` pointing at an existing directory (an unwritable/invalid
+    location for the file itself) must fail clearly rather than hang or
+    crash obscurely."""
+    repo = Path(__file__).resolve().parent.parent
+    binary = build_recorder_binary(repo)
+    workdir = make_workdir(repo)
+    db_path = workdir / "iam_a_directory"
+    db_path.mkdir()
+
+    proc, pid_path = start_pid_probe_recording(repo, binary, db_path, workdir, "dir-db-test")
+    try:
+        returncode = proc.wait(timeout=15)
+        stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+    finally:
+        stop_process(proc)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+
+    assert returncode != 0, stderr
+    assert "unable to open" in stderr.lower() or "failed to open" in stderr.lower(), stderr
+    assert db_path.is_dir(), "the directory must be left untouched"
+
+
+def test_record_fails_fast_when_database_is_locked_at_open_time() -> None:
+    """Gap: nothing covers another process holding the database locked when
+    `record` starts. Before the fix, `Store::open`'s schema-init retry loop
+    re-armed SQLite's 5-second busy_timeout on every one of up to 100
+    retries, so a lock held by another process (rather than the brief
+    startup race the loop exists for) could hang `record` for minutes with
+    no forwarding and no feedback. It must now fail within roughly one
+    busy_timeout window, and must not orphan the wrapped server."""
+    repo = Path(__file__).resolve().parent.parent
+    binary = build_recorder_binary(repo)
+    workdir = make_workdir(repo)
+    db_path = workdir / "sessions.db"
+
+    # Create a real database first, then hold an exclusive lock on it from a
+    # separate connection -- the same shape a crashed or long-running writer
+    # would leave behind.
+    setup_conn = sqlite3.connect(db_path)
+    setup_conn.execute("CREATE TABLE IF NOT EXISTS probe(x)")
+    setup_conn.commit()
+    setup_conn.close()
+
+    locker = sqlite3.connect(db_path, timeout=0.1)
+    locker.execute("BEGIN EXCLUSIVE")
+    try:
+        proc, pid_path = start_pid_probe_recording(repo, binary, db_path, workdir, "locked-open-test")
+        try:
+            start = time.monotonic()
+            returncode = proc.wait(timeout=25)
+            elapsed = time.monotonic() - start
+            stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+        finally:
+            stop_process(proc)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
+    finally:
+        locker.rollback()
+        locker.close()
+
+    assert returncode != 0, stderr
+    assert "locked" in stderr.lower(), stderr
+    assert elapsed < 20, (
+        f"took {elapsed:.1f}s to give up on a locked database; "
+        f"the schema-init retry loop must be bounded by wall-clock time, not just "
+        f"retry count (see SCHEMA_LOCK_RETRY_BUDGET). stderr:\n{stderr}"
+    )
+    assert pid_path.exists(), "the wrapped server never started"
+    server_pid = int(pid_path.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while process_is_running(server_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not process_is_running(server_pid), "a locked database failure orphaned the MCP server"
+
+
+def test_record_survives_a_database_lock_that_clears_mid_session() -> None:
+    """Gap: nothing covers the database becoming locked *after* recording has
+    already started (e.g. another tool briefly opening the same file). Per
+    forward-before-record, message forwarding between client and server must
+    never stall on storage contention -- only the asynchronous write can
+    fail. This proves it end to end: a forwarded reply arrives immediately
+    even while the database is held locked long enough to force that
+    message's write to fail, recording resumes once the lock clears, the
+    command still reports the loss with a non-zero exit (never silently),
+    and the database is left healthy and reusable afterward.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    binary = build_recorder_binary(repo)
+    workdir = make_workdir(repo)
+    db_path = workdir / "sessions.db"
+    fake_server = repo / "tests" / "fake_mcp_server.py"
+
+    proc = subprocess.Popen(
+        [
+            str(binary),
+            "--db", str(db_path),
+            "record", "--client", "midlock-test", "--",
+            sys.executable, str(fake_server),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+    )
+    try:
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
+        proc.stdin.flush()
+        assert proc.stdout.readline().strip(), "no response forwarded for the first exchange"
+
+        deadline = time.monotonic() + 15
+        committed = 0
+        while time.monotonic() < deadline:
+            try:
+                conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=0.1)
+                try:
+                    committed = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                finally:
+                    conn.close()
+            except sqlite3.OperationalError:
+                pass
+            if committed == 2:
+                break
+            time.sleep(0.05)
+        assert committed == 2, "the first exchange was not committed before the lock test began"
+
+        # Hold an exclusive lock well past SQLite's 5-second busy_timeout, so
+        # the write attempt(s) made while it is held are guaranteed to fail
+        # rather than merely delayed.
+        locker = sqlite3.connect(db_path, timeout=0.1)
+        locker.execute("BEGIN EXCLUSIVE")
+        lock_acquired = time.monotonic()
+
+        proc.stdin.write(frame({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"message": "during-lock"}},
+        }))
+        proc.stdin.flush()
+        send_time = time.monotonic()
+        during_lock_response = proc.stdout.readline()
+        forward_elapsed = time.monotonic() - send_time
+        assert during_lock_response.strip(), "no response forwarded while the database was locked"
+        assert b"during-lock" in during_lock_response
+
+        # The forwarded reply above must not have waited on storage at all.
+        assert forward_elapsed < 2.0, (
+            f"forwarding took {forward_elapsed:.2f}s while the database was locked; "
+            "forward-before-record must never block on storage contention"
+        )
+
+        remaining = (lock_acquired + 6.5) - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        locker.rollback()
+        locker.close()
+
+        proc.stdin.write(frame({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"message": "after-lock"}},
+        }))
+        proc.stdin.flush()
+        after_lock_response = proc.stdout.readline()
+        assert b"after-lock" in after_lock_response, "recording did not resume after the lock cleared"
+
+        proc.stdin.close()
+        returncode = proc.wait(timeout=20)
+        stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+    finally:
+        stop_process(proc)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+
+    # The loss must be reported, never silent (never exit 0 with data missing).
+    assert returncode != 0, stderr
+    assert "failed to persist" in stderr.lower() or "capture lost" in stderr.lower(), stderr
+
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    rows = conn.execute("SELECT seq, direction, payload FROM messages ORDER BY seq").fetchall()
+    (dropped_messages, ended_at) = conn.execute(
+        "SELECT dropped_messages, ended_at FROM sessions"
+    ).fetchone()
+    conn.close()
+
+    assert ended_at is not None, "the session must still be finalized despite the lock"
+    assert dropped_messages >= 1, "no message was actually lost to the lock"
+    # Every message either landed in storage or was accounted for as dropped;
+    # none vanished silently. Six messages were sent (three exchanges).
+    assert len(rows) + dropped_messages == 6, (rows, dropped_messages)
+    # The two exchanges outside the lock window must be fully intact.
+    first_request = next(r for r in rows if json.loads(r[2]).get("method") == "initialize")
+    assert first_request[1] == "c2s"
+    after_lock_rows = [r for r in rows if "after-lock" in r[2]]
+    assert len(after_lock_rows) == 2, "the exchange after the lock cleared must be fully recorded"
+
+    # The database must be left healthy and reusable, not "worse than
+    # before": a fresh recording against the same file must still succeed.
+    second = subprocess.run(
+        [
+            str(binary), "--db", str(db_path),
+            "record", "--client", "after-midlock-test", "--",
+            sys.executable, str(fake_server),
+        ],
+        input=frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=30,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr.decode("utf-8", errors="replace")
+    assert len(parse_frames(second.stdout)) == 1
+
+
+def test_streamable_http_handles_genuinely_concurrent_sessions() -> None:
+    # Reliability inventory item 7 (docs/tasks/reliability-coverage-inventory.md):
+    # every existing record-http test issues requests sequentially. Here three
+    # logical sessions send requests truly in parallel - synchronized on a
+    # barrier so they are in flight together - one of them SSE, interleaved
+    # with the other two's plain JSON, across several rounds. Every client
+    # must get back only its own response; every recording must contain
+    # exactly its own messages with a complete, gap-free `seq`; every session
+    # must be finalized by a graceful proxy shutdown; and the database must
+    # remain structurally sound throughout.
+    repo = Path(__file__).resolve().parent.parent
+    db_path = make_workdir(repo) / "http-concurrent-sessions.db"
+    upstream_port = free_port()
+    proxy_port = free_port()
+    fake_server = repo / "tests" / "fake_mcp_http_server.py"
+    binary = build_recorder_binary(repo)
+
+    upstream = subprocess.Popen(
+        [sys.executable, str(fake_server), str(upstream_port)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+    )
+    proxy = None
+    try:
+        wait_for_port(upstream_port, upstream, timeout=60)
+        proxy = subprocess.Popen(
+            [
+                str(binary),
+                "--db",
+                str(db_path),
+                "record-http",
+                "--listen",
+                f"127.0.0.1:{proxy_port}",
+                "--target",
+                f"http://127.0.0.1:{upstream_port}",
+                "--client",
+                "concurrent-test",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=repo,
+            # A new process group lets the shutdown below aim Ctrl-Break at
+            # only this process on Windows; harmless elsewhere.
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        )
+        wait_for_port(proxy_port, proxy, timeout=60)
+
+        rounds = 4
+        # One SSE session and two plain-JSON sessions, so at least one SSE
+        # response is genuinely interleaved with JSON traffic on the others.
+        sessions = [
+            ("concurrent-session-A", True),
+            ("concurrent-session-B", False),
+            ("concurrent-session-C", False),
+        ]
+        barrier = threading.Barrier(len(sessions))
+        results: dict[str, list[tuple[str, int, bytes]]] = {name: [] for name, _ in sessions}
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+
+        def worker(session_name: str, use_sse: bool) -> None:
+            try:
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                    "Mcp-Session-Id": session_name,
+                }
+                path = "/sse-echo" if use_sse else "/"
+                for round_index in range(rounds):
+                    rpc_id = f"{session_name}-{round_index}"
+                    payload = {"jsonrpc": "2.0", "id": rpc_id, "method": "tools/list", "params": {}}
+                    # Every thread waits here, so all three requests for this
+                    # round are issued together rather than one after another.
+                    barrier.wait(timeout=30)
+                    status, _, body = http_post(proxy_port, path, payload, headers)
+                    results[session_name].append((rpc_id, status, body))
+            except BaseException as exc:  # noqa: BLE001 - surfaced on the main thread below
+                with errors_lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(name, use_sse), name=name)
+            for name, use_sse in sessions
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+            assert not thread.is_alive(), f"{thread.name} did not finish"
+        assert not errors, errors
+
+        # Every client got back exactly its own, correctly correlated
+        # response - no cross-talk between the concurrently running sessions.
+        for session_name, use_sse in sessions:
+            recorded = results[session_name]
+            assert len(recorded) == rounds, (session_name, recorded)
+            for round_index, (rpc_id, status, body) in enumerate(recorded):
+                assert status == 200, (session_name, round_index, status, body)
+                if use_sse:
+                    assert f'"id":"{rpc_id}"'.encode("utf-8") in body, (session_name, body)
+                else:
+                    assert json.loads(body)["id"] == rpc_id, (session_name, body)
+
+        # Let storage drain before asking for a shutdown, so the assertions
+        # below are about shutdown finalizing sessions, not about it also
+        # racing a capture backlog.
+        expected_per_session = rounds * 2  # one request + one response per round
+        deadline = time.monotonic() + 10
+        counts: list[tuple[str, int]] = []
+        while time.monotonic() < deadline:
+            conn = sqlite3.connect(db_path)
+            counts = conn.execute(
+                "SELECT session_id, COUNT(*) FROM messages GROUP BY session_id"
+            ).fetchall()
+            conn.close()
+            if len(counts) == len(sessions) and all(
+                count == expected_per_session for _, count in counts
+            ):
+                break
+            time.sleep(0.05)
+        assert len(counts) == len(sessions) and all(
+            count == expected_per_session for _, count in counts
+        ), counts
+
+        # A graceful stop (not a hard kill, see `stop_process`/`terminate()`)
+        # must finalize every still-open session before the process exits.
+        # SIGTERM on Unix, Ctrl-Break on Windows; see `stop_signals`.
+        proxy.send_signal(stop_signals()[-1])
+        try:
+            returncode = proxy.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proxy.kill()
+            proxy.wait(timeout=10)
+            raise AssertionError("record-http did not exit after a graceful stop signal")
+        stderr = proxy.stderr.read().decode("utf-8", errors="replace") if proxy.stderr else ""
+        assert returncode == 0, stderr
+
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+            session_rows = conn.execute(
+                "SELECT id, ended_at, dropped_messages FROM sessions"
+            ).fetchall()
+            assert len(session_rows) == len(sessions), session_rows
+            for session_id, ended_at, dropped_messages in session_rows:
+                assert ended_at is not None, (
+                    f"session {session_id} was not finalized by the graceful shutdown; "
+                    f"stderr:\n{stderr}"
+                )
+                assert dropped_messages == 0, (session_id, dropped_messages, stderr)
+
+            all_rpc_ids_by_internal_session = {
+                session_id: {
+                    rpc_id
+                    for (rpc_id,) in conn.execute(
+                        "SELECT DISTINCT rpc_id FROM messages WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchall()
+                }
+                for (session_id,) in conn.execute(
+                    "SELECT DISTINCT session_id FROM messages"
+                ).fetchall()
+            }
+
+            for session_name, _ in sessions:
+                expected_ids = {json.dumps(f"{session_name}-{i}") for i in range(rounds)}
+                # The internal session id is an opaque store-generated
+                # identifier unrelated to the Mcp-Session-Id header, so match
+                # each logical session to its recording by the rpc_ids it
+                # must uniquely own rather than by row order.
+                matches = [
+                    session_id
+                    for session_id, rpc_ids in all_rpc_ids_by_internal_session.items()
+                    if rpc_ids == expected_ids
+                ]
+                assert len(matches) == 1, (session_name, all_rpc_ids_by_internal_session)
+                session_id = matches[0]
+
+                rows = conn.execute(
+                    "SELECT seq, direction, rpc_id FROM messages WHERE session_id = ? ORDER BY seq",
+                    (session_id,),
+                ).fetchall()
+                # `seq` is complete and gap-free: exactly 0..expected_per_session.
+                assert [seq for seq, _, _ in rows] == list(range(expected_per_session)), (
+                    session_name,
+                    rows,
+                )
+                assert [direction for _, direction, _ in rows] == ["c2s", "s2c"] * rounds, (
+                    session_name,
+                    rows,
+                )
+        finally:
+            conn.close()
+    finally:
+        if proxy is not None:
+            stop_process(proxy)
+        stop_process(upstream)
+
+
 if __name__ == "__main__":
     test_proxy_records_session()
     test_sessions_show_calls_json_correlates_exchanges()
@@ -4541,7 +5287,10 @@ if __name__ == "__main__":
     test_replay_and_bench_warn_when_source_session_is_redacted()
     test_semantic_search_finds_drift_and_gates_on_redaction()
     test_oversized_unterminated_frame_is_capped()
+    test_record_relays_a_large_frame_in_both_directions_in_linear_time()
     test_record_exits_when_the_server_exits_while_client_stdin_stays_open()
+    test_record_drops_a_truncated_frame_when_the_server_dies_mid_write()
+    test_record_drops_a_truncated_frame_when_the_client_closes_stdin_mid_write()
     test_streamable_http_proxy_records_json_and_sse()
     test_replay_http_reproduces_json_and_sse_sessions_and_fails_clearly_on_bad_envelope()
     test_replay_http_caps_oversized_json_response()
@@ -4559,4 +5308,9 @@ if __name__ == "__main__":
     test_stop_signal_finalizes_the_recording()
     test_stubborn_server_is_terminated_after_the_reap_grace()
     test_second_stop_signal_skips_the_reap_grace()
+    test_record_rejects_a_corrupt_database_without_touching_it()
+    test_record_rejects_a_directory_as_the_database_path()
+    test_record_fails_fast_when_database_is_locked_at_open_time()
+    test_record_survives_a_database_lock_that_clears_mid_session()
+    test_streamable_http_handles_genuinely_concurrent_sessions()
     print("integration test passed")

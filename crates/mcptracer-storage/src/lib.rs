@@ -129,6 +129,14 @@ PRAGMA foreign_keys = ON;
 PRAGMA synchronous = NORMAL;
 "#;
 
+/// Wall-clock ceiling on the schema-init retry loop in [`Store::init_schema`].
+/// Matches the `busy_timeout` above: a single attempt can itself block for
+/// up to that long inside SQLite's busy handler, so bounding retries by
+/// *count* rather than elapsed time let a database locked by another
+/// process (not just the brief startup race this loop exists for) multiply
+/// that timeout up to a hundredfold and hang `Store::open` for minutes.
+const SCHEMA_LOCK_RETRY_BUDGET: Duration = Duration::from_secs(5);
+
 const SCHEMA_BOOTSTRAP: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -438,13 +446,21 @@ impl Store {
         // SQLite can return BUSY/LOCKED immediately while another process is
         // switching a new database into WAL mode. Retrying the whole setup is
         // safe: every migration is transactional and schema bootstrap is
-        // idempotent.
-        let mut retries = 0;
+        // idempotent. Bounded by wall-clock time, not attempt count: see
+        // `SCHEMA_LOCK_RETRY_BUDGET`.
+        let deadline = std::time::Instant::now() + SCHEMA_LOCK_RETRY_BUDGET;
         loop {
             match self.init_schema_once() {
-                Err(error) if is_database_lock_error(&error) && retries < 100 => {
-                    retries += 1;
+                Err(error)
+                    if is_database_lock_error(&error) && std::time::Instant::now() < deadline =>
+                {
                     std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) if is_database_lock_error(&error) => {
+                    return Err(error.context(
+                        "database appears to be locked by another process; \
+                         gave up waiting for it to become available",
+                    ));
                 }
                 result => return result,
             }
@@ -3003,5 +3019,112 @@ mod tests {
             0o600
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// A corrupt/garbage file at `--db` must fail fast and clearly, and must
+    /// never be modified: there could be a real (if unreadable) database
+    /// behind it that a "helpful" overwrite would destroy.
+    #[test]
+    fn open_rejects_a_corrupt_database_file_without_modifying_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "mcptracer-corrupt-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("corrupt.db");
+        fs::write(&db, b"not a sqlite database, just garbage bytes here").unwrap();
+        let before = fs::read(&db).unwrap();
+
+        let start = std::time::Instant::now();
+        let result = Store::open(&db);
+        let elapsed = start.elapsed();
+
+        let error = result.err().expect("opening a corrupt file must fail");
+        assert!(
+            error.to_string().to_lowercase().contains("not a database"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            fs::read(&db).unwrap(),
+            before,
+            "a corrupt database file must not be modified"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "must fail fast: {elapsed:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `--db` pointing at a directory must fail clearly instead of hanging
+    /// or panicking.
+    #[test]
+    fn open_rejects_a_directory_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "mcptracer-dirpath-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("iam_a_dir");
+        fs::create_dir_all(&db).unwrap();
+
+        let start = std::time::Instant::now();
+        let result = Store::open(&db);
+        let elapsed = start.elapsed();
+
+        let error = result.err().expect("opening a directory must fail");
+        let message = error.to_string().to_lowercase();
+        assert!(
+            message.contains("unable to open") || message.contains("failed to open"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "must fail fast: {elapsed:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Regression test: `init_schema`'s retry loop used to be bounded only by
+    /// a retry *count* (100), and every retry re-armed SQLite's 5-second
+    /// `busy_timeout` from scratch — a database locked by another process
+    /// the whole time (not just the brief startup race the loop exists for)
+    /// could hang `Store::open` for minutes. It must now give up within
+    /// roughly one `SCHEMA_LOCK_RETRY_BUDGET` window and say clearly why.
+    #[test]
+    fn open_gives_up_promptly_on_a_database_locked_by_another_connection() {
+        let dir = std::env::temp_dir().join(format!(
+            "mcptracer-lock-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("locked.db");
+        Store::open(&db).unwrap();
+
+        let locker = Connection::open(&db).unwrap();
+        locker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        let start = std::time::Instant::now();
+        let result = Store::open(&db);
+        let elapsed = start.elapsed();
+
+        let error = result.err().expect("opening a locked database must fail");
+        assert!(
+            error.to_string().to_lowercase().contains("locked"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            elapsed < SCHEMA_LOCK_RETRY_BUDGET + Duration::from_secs(3),
+            "took {elapsed:?} to give up on a permanently locked database; \
+             the retry loop must be bounded by wall-clock time"
+        );
+
+        drop(locker);
+        let _ = fs::remove_dir_all(dir);
     }
 }

@@ -271,8 +271,16 @@ pub fn finish_storage_writer(
 /// recording it, until `buf` holds no more complete frames. The sequence and
 /// timestamp are reserved before the asynchronous write, so the two direction
 /// pumps have one stable ordering source while still forwarding before parsing
-/// or recording. Returns `false` if forwarding should stop (write/flush error
-/// or unparseable frame).
+/// or recording. Returns `false` if forwarding should stop (write/flush error,
+/// unparseable frame, or a single frame over `MAX_FRAME_BYTES`).
+///
+/// The per-frame `MAX_FRAME_BYTES` check here, ahead of forwarding, is what
+/// actually enforces the cap precisely. The caller's own check of the
+/// leftover unterminated `buf` (after this returns) only catches a frame that
+/// never completes; checking buffer size instead of `consumed` here would
+/// misfire on a large frame immediately followed by the start of the next
+/// one, since the pair can transiently exceed the cap in `buf` while neither
+/// frame does on its own.
 pub async fn drain_frames<W>(
     buf: &mut Vec<u8>,
     direction: Direction,
@@ -294,6 +302,17 @@ where
                 return false;
             }
         };
+
+        if frame.consumed > MAX_FRAME_BYTES {
+            // Forward-before-record still applies: a frame this large is a
+            // protocol violation, not traffic to relay, so it must not reach
+            // the other side any more than an unparseable one would.
+            warn!(
+                "{direction:?} stdio frame of {} bytes exceeded the {MAX_FRAME_BYTES} byte cap; stopping the pump",
+                frame.consumed
+            );
+            return false;
+        }
 
         let stamp = reserve_capture_stamp(seq);
 
@@ -406,9 +425,9 @@ mod tests {
     use mcptracer_protocol::StdioFrame;
 
     use super::{
-        finish_storage_writer, record_frame, redact_server_command, reserve_capture_stamp,
-        spawn_storage_writer, try_record, CaptureStamp, McpMessage, StorageQueueBudget,
-        STORAGE_QUEUE_MAX_BYTES,
+        drain_frames, finish_storage_writer, record_frame, redact_server_command,
+        reserve_capture_stamp, spawn_storage_writer, try_record, CaptureStamp, McpMessage,
+        StorageQueueBudget, MAX_FRAME_BYTES, STORAGE_QUEUE_MAX_BYTES,
     };
 
     fn message(seq: u64) -> McpMessage {
@@ -514,6 +533,86 @@ mod tests {
         );
 
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    /// One complete, newline-terminated stdio frame of exactly `total_len`
+    /// bytes (including the trailing `\n`). The filler byte is never `\n` or
+    /// `\r`, so this is the only frame boundary in the buffer.
+    fn frame_bytes_of_len(total_len: usize) -> Vec<u8> {
+        let mut bytes = vec![b'a'; total_len - 1];
+        bytes.push(b'\n');
+        bytes
+    }
+
+    #[tokio::test]
+    async fn drain_frames_admits_exactly_the_cap_and_one_byte_under_it() {
+        // The pass case: a single frame at, or just under, the real
+        // MAX_FRAME_BYTES must still be forwarded and drained, not rejected
+        // as oversized. This is the boundary the inventory flagged as
+        // untested everywhere ("exactly-at and just-under -- the pass case").
+        for total_len in [MAX_FRAME_BYTES, MAX_FRAME_BYTES - 1] {
+            let mut buf = frame_bytes_of_len(total_len);
+            let mut writer: Vec<u8> = Vec::new();
+            let (tx, _rx) = mpsc::sync_channel(4);
+            let seq = AtomicU64::new(0);
+            let dropped = AtomicU64::new(0);
+            let budget = StorageQueueBudget::new(STORAGE_QUEUE_MAX_BYTES);
+
+            let kept_pumping = drain_frames(
+                &mut buf,
+                Direction::ClientToServer,
+                &mut writer,
+                &tx,
+                &seq,
+                &dropped,
+                &budget,
+            )
+            .await;
+
+            assert!(kept_pumping, "a {total_len}-byte frame must not be capped");
+            assert!(buf.is_empty(), "the complete frame must be fully drained");
+            assert_eq!(
+                writer.len(),
+                total_len,
+                "the whole frame must be forwarded, cap or no cap"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_frames_refuses_a_single_frame_one_byte_past_the_cap() {
+        // The reject case at the true boundary: earlier coverage only proved
+        // an unterminated frame that never completes gets capped (9 MiB of
+        // bytes with no newline at all). A frame that legitimately completes
+        // with a newline just one byte over MAX_FRAME_BYTES must be refused
+        // too, and -- forward-before-record notwithstanding -- must not reach
+        // the writer, the same as an unparseable frame never does.
+        let mut buf = frame_bytes_of_len(MAX_FRAME_BYTES + 1);
+        let mut writer: Vec<u8> = Vec::new();
+        let (tx, _rx) = mpsc::sync_channel(4);
+        let seq = AtomicU64::new(0);
+        let dropped = AtomicU64::new(0);
+        let budget = StorageQueueBudget::new(STORAGE_QUEUE_MAX_BYTES);
+
+        let kept_pumping = drain_frames(
+            &mut buf,
+            Direction::ClientToServer,
+            &mut writer,
+            &tx,
+            &seq,
+            &dropped,
+            &budget,
+        )
+        .await;
+
+        assert!(
+            !kept_pumping,
+            "a frame one byte over the cap must stop the pump"
+        );
+        assert!(
+            writer.is_empty(),
+            "an oversized frame must not be forwarded, matching an unparseable one"
+        );
     }
 
     #[test]

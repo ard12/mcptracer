@@ -43,6 +43,13 @@ Its authoritative source revision is recorded in
   the session instead of abandoning it, the session is closed before the server
   wait so `SIGTERM` followed by `SIGKILL` cannot leave it open, and a signal
   handler that fails to install is no longer mistaken for a stop request.
+- `record` no longer hangs for minutes when another process holds its database
+  locked: startup gives up after about 5 seconds with a clear error. A lock
+  taken mid-session never stalls forwarding; the lost write is reported with a
+  non-zero exit.
+- Large stdio messages are relayed in linear time; relaying one near the 8 MiB
+  cap previously took tens of seconds. The cap itself is now exact rather than
+  admitting frames up to 4 KiB over it.
 - `setup` writes the absolute path of the running binary into client
   configurations. Desktop MCP clients are launched with a minimal `PATH` that
   usually excludes `~/.local/bin`, so the previous bare `mcptracer` command
