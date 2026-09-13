@@ -3852,15 +3852,15 @@ def test_record_captures_response_that_arrives_after_client_closes_stdin() -> No
     workdir = make_workdir(repo)
     db_path = workdir / "sessions.db"
 
-    # Reads exactly one request, sleeps briefly -- comfortably inside the 30s
-    # drain grace, far outside any race window -- then answers and exits, as
-    # a server still finishing work when its client hangs up would.
+    # Wait for actual upstream EOF before replying. A sleep alone cannot
+    # establish that EOF preceded the response on a busy CI runner.
     server = workdir / "slow_reply_then_exit.py"
     server.write_text(
         "import sys\n"
         "import time\n"
         "sys.stdin.readline()\n"
-        "time.sleep(1)\n"
+        "assert sys.stdin.read() == ''\n"
+        "time.sleep(0.1)\n"
         'sys.stdout.write(\'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\\n\')\n'
         "sys.stdout.flush()\n",
         encoding="utf-8",
@@ -3893,12 +3893,16 @@ def test_record_captures_response_that_arrives_after_client_closes_stdin() -> No
     conn = sqlite3.connect(db_path)
     session_id, ended_at = conn.execute("SELECT id, ended_at FROM sessions").fetchone()
     rows = conn.execute(
-        "SELECT direction, method FROM messages WHERE session_id = ? ORDER BY seq",
+        "SELECT direction, method, payload FROM messages WHERE session_id = ? ORDER BY seq",
         (session_id,),
     ).fetchall()
     conn.close()
     assert ended_at is not None, "session was left open despite the server answering before exit"
-    assert rows == [("c2s", "initialize"), ("s2c", None)], rows
+    assert [(direction, method) for direction, method, _ in rows] == [
+        ("c2s", "initialize"), ("s2c", None)
+    ], rows
+    assert json.loads(rows[0][2]) == json.loads(stdin), rows
+    assert json.loads(rows[1][2]) == responses[0], rows
 
     validated = subprocess.run(
         [
@@ -3933,16 +3937,16 @@ def test_killed_recording_leaves_database_usable_for_a_new_session() -> None:
     # rather than just the cargo wrapper around it.
     binary_name = "mcptracer.exe" if os.name == "nt" else "mcptracer"
     binary = repo / "target" / "debug" / binary_name
-    if not binary.exists():
-        build = subprocess.run(
-            ["cargo", "build", "--quiet", "--bin", "mcptracer"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=repo,
-            timeout=180,
-            check=False,
-        )
-        assert build.returncode == 0, build.stderr.decode("utf-8", errors="replace")
+    # Refresh even when a binary exists: this test also runs independently.
+    build = subprocess.run(
+        ["cargo", "build", "--quiet", "--locked", "--bin", "mcptracer"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=180,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr.decode("utf-8", errors="replace")
 
     killed = subprocess.Popen(
         [
@@ -3960,12 +3964,34 @@ def test_killed_recording_leaves_database_usable_for_a_new_session() -> None:
         assert killed.stdin is not None and killed.stdout is not None
         killed.stdin.write(frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
         killed.stdin.flush()
-        # Proves the session is live -- a request really was forwarded and
-        # answered -- before the rug gets pulled out from under it.
-        assert killed.stdout.readline().strip(), "no response forwarded before kill"
+        # Forwarding precedes asynchronous storage. Observe both committed
+        # messages through a separate read-only connection before killing;
+        # a forwarded response alone does not prove durable data exists.
+        deadline = time.monotonic() + 15
+        committed_rows = []
+        while time.monotonic() < deadline:
+            assert killed.poll() is None, "recorder exited before the crash probe"
+            try:
+                conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=0.1)
+                try:
+                    committed_rows = conn.execute(
+                        "SELECT seq, direction, payload FROM messages ORDER BY seq"
+                    ).fetchall()
+                finally:
+                    conn.close()
+            except sqlite3.OperationalError:
+                pass  # Database/schema creation may still be in progress.
+            if len(committed_rows) == 2:
+                break
+            time.sleep(0.05)
+        assert len(committed_rows) == 2, "request and response were not committed before kill"
+        assert [row[1] for row in committed_rows] == ["c2s", "s2c"], committed_rows
+        assert json.loads(committed_rows[0][2])["method"] == "initialize", committed_rows
+        assert "result" in json.loads(committed_rows[1][2]), committed_rows
         killed.kill()
         killed.wait(timeout=10)
     finally:
+        stop_process(killed)
         if killed.stdin is not None:
             killed.stdin.close()
         if killed.stdout is not None:
@@ -3975,6 +4001,10 @@ def test_killed_recording_leaves_database_usable_for_a_new_session() -> None:
 
     conn = sqlite3.connect(db_path)
     (killed_session_id,) = conn.execute("SELECT id FROM sessions").fetchone()
+    assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    assert conn.execute(
+        "SELECT seq, direction, payload FROM messages ORDER BY seq"
+    ).fetchall() == committed_rows, "committed data changed after recorder termination"
     conn.close()
 
     validated = subprocess.run(
@@ -4026,7 +4056,15 @@ def test_killed_recording_leaves_database_usable_for_a_new_session() -> None:
     (second_session_id,) = conn.execute(
         "SELECT id FROM sessions WHERE client = ?", ("after-kill-test",)
     ).fetchone()
+    assert conn.execute(
+        "SELECT seq, direction, payload FROM messages WHERE session_id = ? ORDER BY seq",
+        (killed_session_id,),
+    ).fetchall() == committed_rows, "new recording modified the interrupted session"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE session_id = ?", (second_session_id,)
+    ).fetchone()[0] == 4
     conn.close()
+    assert len(parse_frames(second.stdout)) == 2
 
     healthy = subprocess.run(
         [str(binary), "--db", str(db_path), "validate", second_session_id, "--json"],
@@ -4091,10 +4129,20 @@ def test_mtrace_import_preserves_redaction_placeholder_and_policy() -> None:
 
     conn = sqlite3.connect(source_db)
     (source_id,) = conn.execute("SELECT id FROM sessions").fetchone()
+    source_payloads = [json.loads(row[0]) for row in conn.execute(
+        "SELECT payload FROM messages ORDER BY seq"
+    ).fetchall()]
     conn.close()
+    assert len(source_payloads) == 2, source_payloads
+    assert secret not in json.dumps(source_payloads), "secret leaked into source recording"
 
     exported = mcptracer(source_db, "export", source_id, "--out", str(artifact))
     assert exported.returncode == 0, exported.stderr.decode("utf-8", errors="replace")
+    # Inspect decompressed content: searching compressed bytes can miss secrets.
+    with gzip.open(artifact, "rt", encoding="utf-8") as artifact_file:
+        document = json.load(artifact_file)
+    assert secret not in json.dumps(document), "secret leaked into exported artifact"
+    assert [message["payload"] for message in document["messages"]] == source_payloads
 
     imported = mcptracer(imported_db, "import", str(artifact), "--strict")
     assert imported.returncode == 0, imported.stderr.decode("utf-8", errors="replace")
@@ -4106,7 +4154,7 @@ def test_mtrace_import_preserves_redaction_placeholder_and_policy() -> None:
     payloads = [
         row[0]
         for row in conn.execute(
-            "SELECT payload FROM messages WHERE session_id = ?", (imported_id,)
+            "SELECT payload FROM messages WHERE session_id = ? ORDER BY seq", (imported_id,)
         ).fetchall()
     ]
     conn.close()
@@ -4116,6 +4164,11 @@ def test_mtrace_import_preserves_redaction_placeholder_and_policy() -> None:
     assert redaction_policy == "default", redaction_policy
     assert json.loads(redaction_keys_json) == [], redaction_keys_json
 
+    assert [json.loads(payload) for payload in payloads] == source_payloads
+    assert json.loads(payloads[0])["params"]["arguments"] == {
+        "message": "hi", "api_key": "***REDACTED***"
+    }
+    assert json.loads(payloads[1])["result"]["content"][0]["text"] == "Echo: hi"
     assert payloads, "expected a recorded tools/call message"
     assert any('"api_key":"***REDACTED***"' in payload for payload in payloads), payloads
     assert all(secret not in payload for payload in payloads), "secret leaked into imported db"
@@ -4124,8 +4177,10 @@ def test_mtrace_import_preserves_redaction_placeholder_and_policy() -> None:
 def test_record_handles_a_long_session_under_write_batching() -> None:
     """Gap: every fixture elsewhere is 4-6 messages, so the 128-message
     storage write batch (STORAGE_WRITE_BATCH_MESSAGES) and the 4096-slot
-    channel have never run under load. 2,000 request/response pairs (4,000
-    messages) push well past both. Ordering under batching is the property
+    channel have little load coverage. 2,000 request/response pairs (4,000
+    messages) cross many batch boundaries and leave a partial final batch.
+    This does not establish saturation of the 4096-slot channel or the byte
+    budget: the consumer drains concurrently. Ordering under batching is the property
     at risk, so `seq` is checked for completeness and strict monotonicity,
     not just message count.
 
@@ -4191,12 +4246,11 @@ def test_record_handles_a_long_session_under_write_batching() -> None:
     session_id, total_messages, dropped_messages = conn.execute(
         "SELECT id, total_messages, dropped_messages FROM sessions"
     ).fetchone()
-    seqs = [
-        row[0]
-        for row in conn.execute(
-            "SELECT seq FROM messages WHERE session_id = ? ORDER BY seq", (session_id,)
-        ).fetchall()
-    ]
+    stored_rows = conn.execute(
+        "SELECT seq, direction, payload FROM messages WHERE session_id = ? ORDER BY seq",
+        (session_id,),
+    ).fetchall()
+    seqs = [row[0] for row in stored_rows]
     conn.close()
 
     expected_total = message_count * 2
@@ -4204,6 +4258,10 @@ def test_record_handles_a_long_session_under_write_batching() -> None:
     assert total_messages == expected_total, total_messages
     assert len(seqs) == expected_total, len(seqs)
     assert seqs == list(range(expected_total)), "sequence has gaps or is out of order"
+    # Global direction interleaving is scheduler-dependent. Each direction
+    # must retain every complete payload exactly once and in source order.
+    assert [json.loads(payload) for _, direction, payload in stored_rows if direction == "c2s"] == messages
+    assert [json.loads(payload) for _, direction, payload in stored_rows if direction == "s2c"] == responses
 
     print(f"[long-session] {expected_total} messages recorded in {elapsed:.1f}s", file=sys.stderr)
 
