@@ -48,8 +48,6 @@ a compatibility case, or a focused patch. See [the contribution guide](CONTRIBUT
 | Contact | Details |
 | --- | --- |
 | Commercial licensing | [Request permission](https://github.com/ard12/mcptracer/issues/new?template=licensing_request.md) |
-| General contact | [Open a GitHub issue](https://github.com/ard12/mcptracer/issues/new) — no direct email is published |
-| Website | |
-| Other | |
+| Email | [ard45067@gmail.com](mailto:ard45067@gmail.com) |
 
 Please use [private vulnerability reporting](SECURITY.md) for security issues.

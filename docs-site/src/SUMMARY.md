@@ -3,6 +3,7 @@
 [Introduction](introduction.md)
 
 - [Installation](installation.md)
+- [Onboarding: your first recording](onboarding.md)
 - [Guide](guide/index.md)
   - [Recording](guide/recording.md)
   - [Replay](spec/replay.md)

@@ -111,6 +111,7 @@ stored placeholders, so they may not reproduce calls that require real secrets.
 
 | Guide | What you will find |
 | --- | --- |
+| [Onboarding: your first recording](docs/onboarding.md) | A first-run journey: install, wrap a client, make a tool call, and compare two sessions in about ten minutes. |
 | [Command guide](docs/usage.md) | Recording, client setup, replay, offline mocks, diffing, and exports. |
 | [Capability reference](docs-site/src/reference/capabilities.md) | A short explanation of every command. |
 | [CI integration](docs/ci.md) | Turn local evidence into automated checks. |
@@ -146,9 +147,7 @@ See [About MCPTracer](ABOUT.md) for the project and maintainer section.
 | Contact | Details |
 | --- | --- |
 | Commercial licensing | [Request permission](https://github.com/ard12/mcptracer/issues/new?template=licensing_request.md) |
-| General contact | [Open a GitHub issue](https://github.com/ard12/mcptracer/issues/new) — no direct email is published |
-| Website | |
-| Other | |
+| Email | [ard45067@gmail.com](mailto:ard45067@gmail.com) |
 
 ## License and credit
 
