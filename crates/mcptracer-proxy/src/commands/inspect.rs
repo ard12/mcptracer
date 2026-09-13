@@ -13,7 +13,6 @@ use mcptracer_model::correlate;
 use mcptracer_storage::Store;
 use serde_json::json;
 use tokio::net::TcpListener;
-use tracing::warn;
 
 const INDEX_HTML: &str = include_str!("../../assets/inspect/index.html");
 const APP_JS: &str = include_str!("../../assets/inspect/app.js");
@@ -193,9 +192,11 @@ pub async fn run(args: InspectArgs, db_path: PathBuf) -> Result<()> {
 }
 
 async fn wait_for_shutdown() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        warn!("failed to install Ctrl-C handler: {error}");
-    }
+    // A failed handler registration must not stop the server by itself; see
+    // `crate::shutdown::next_stop_request`. SIGTERM is honored too, so a
+    // process manager's stop request shuts down gracefully.
+    let mut stop = crate::shutdown::listen_for_stop_requests();
+    crate::shutdown::next_stop_request(&mut stop).await;
 }
 
 async fn index_page() -> Html<&'static str> {

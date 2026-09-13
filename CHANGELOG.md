@@ -37,6 +37,12 @@ Its authoritative source revision is recorded in
   session is finalized and closed in every exit path, including `Ctrl-C`, and a
   frame past the 8 MiB cap fails the command instead of silently leaving one
   direction half-open with a zero exit code.
+- Stop requests work at every stage of `record` shutdown. A second `Ctrl-C` was
+  silently ignored for the whole 30-second drain or 5-second server wait; it
+  now cuts either wait short. `SIGTERM` (Unix) and `Ctrl-Break` (Windows) close
+  the session instead of abandoning it, the session is closed before the server
+  wait so `SIGTERM` followed by `SIGKILL` cannot leave it open, and a signal
+  handler that fails to install is no longer mistaken for a stop request.
 - `setup` writes the absolute path of the running binary into client
   configurations. Desktop MCP clients are launched with a minimal `PATH` that
   usually excludes `~/.local/bin`, so the previous bare `mcptracer` command

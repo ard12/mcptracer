@@ -36,6 +36,7 @@ mod commands {
 mod ci_formats;
 mod session_health;
 mod session_writer;
+mod shutdown;
 mod sse;
 
 #[derive(Parser)]

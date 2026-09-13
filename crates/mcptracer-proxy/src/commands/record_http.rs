@@ -190,9 +190,11 @@ pub async fn run(args: RecordHttpArgs, db_path: std::path::PathBuf) -> Result<()
 }
 
 async fn wait_for_shutdown() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        warn!("failed to install Ctrl-C handler: {error}");
-    }
+    // A failed handler registration must not stop the server by itself; see
+    // `crate::shutdown::next_stop_request`. SIGTERM is honored too, so a
+    // process manager's stop request shuts down gracefully.
+    let mut stop = crate::shutdown::listen_for_stop_requests();
+    crate::shutdown::next_stop_request(&mut stop).await;
 }
 
 async fn wait_for_capture_tasks(state: &HttpState) {

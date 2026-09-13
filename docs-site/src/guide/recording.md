@@ -32,10 +32,29 @@ base64-encoded image or file read can approach this limit — if you hit it,
 the session is not usable as evidence.
 
 `record` stops as soon as any of three things happens: the client closes
-stdin, the wrapped server closes stdout, or you press `Ctrl-C`. In every case
-the session is finalized and closed before the process exits, so
-`mcptracer validate` can report on it. When the client closes stdin first, the
-server gets up to 30 seconds to flush a final in-flight response before
-capture stops. When the server exits first, `record` exits too and closes its
-own stdout — which is how the MCP client observes that its server is gone,
-exactly as it would have without the proxy in the middle.
+stdin, the wrapped server closes stdout, or it is asked to stop — `Ctrl-C`
+(or `Ctrl-Break` on Windows), or `SIGTERM`, which is how MCP clients and
+process managers stop a server. In every case the session is finalized and
+closed before the process exits, so `mcptracer validate` can report on it.
+When the client closes stdin first, the server gets up to 30 seconds to flush a
+final in-flight response before capture stops. When the server exits first,
+`record` exits too and closes its own stdout — which is how the MCP client
+observes that its server is gone, exactly as it would have without the proxy
+in the middle.
+
+Once capture stops, the server's stdin is closed and the session is finalized;
+the server then gets 5 seconds to exit before it is killed. Because the session
+is already closed during that wait, a client that follows `SIGTERM` with `SIGKILL`
+during that wait does not leave it unclosed. A stop request exits with status
+0 even if the server exits non-zero on its way down.
+
+Timeouts and repeated stops:
+
+| Waiting for | Limit | A further stop request |
+| --- | --- | --- |
+| The server's last output after the client disconnects | 30 s | ends capture now |
+| The server to exit after capture stops | 5 s | kills the server now |
+
+Only the directly launched server process is killed. If the server command is
+a launcher such as `npx` or a shell script, processes it started itself can
+outlive it.

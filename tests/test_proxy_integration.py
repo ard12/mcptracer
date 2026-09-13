@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import re
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -4266,6 +4267,251 @@ def test_record_handles_a_long_session_under_write_batching() -> None:
     print(f"[long-session] {expected_total} messages recorded in {elapsed:.1f}s", file=sys.stderr)
 
 
+# A server that answers every request and ignores operator stop signals, so a
+# test controls exactly how it ends: "cooperative" exits once its stdin
+# closes, "stubborn" keeps running until it is killed. It writes its PID to a
+# file so the test can check that it is really gone afterwards.
+STOP_TEST_SERVER = """\
+import json, os, signal, sys, time
+for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+    if hasattr(signal, name):
+        signal.signal(getattr(signal, name), signal.SIG_IGN)
+with open(sys.argv[1], "w", encoding="utf-8") as pid_file:
+    pid_file.write(str(os.getpid()))
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    request = json.loads(line)
+    if "id" in request:
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {}}) + "\\n")
+        sys.stdout.flush()
+if sys.argv[2] == "stubborn":
+    time.sleep(300)
+"""
+
+
+def build_recorder_binary(repo: Path) -> Path:
+    """Build and return the compiled binary. Signal tests must signal the
+    recorder itself, not a `cargo run` wrapper that would absorb the signal."""
+    build = subprocess.run(
+        ["cargo", "build", "--quiet", "--locked", "--bin", "mcptracer"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=180,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr.decode("utf-8", errors="replace")
+    return repo / "target" / "debug" / ("mcptracer.exe" if os.name == "nt" else "mcptracer")
+
+
+def stop_signals() -> list[int]:
+    """The operator stop signals to exercise on this platform.
+
+    Windows cannot deliver Ctrl-C to one process group programmatically, so
+    Ctrl-Break stands in for it; both reach `record` through the same listener.
+    The event goes to the whole group - server included - just as a terminal
+    Ctrl-C does, which is why the test server ignores it.
+    """
+    if os.name == "nt":
+        return [signal.CTRL_BREAK_EVENT]
+    return [signal.SIGINT, signal.SIGTERM]
+
+
+def process_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+class StopTestRecording:
+    """`record` wrapping STOP_TEST_SERVER, started with one exchange committed."""
+
+    def __init__(self, repo: Path, binary: Path, mode: str) -> None:
+        self.workdir = make_workdir(repo)
+        self.db_path = self.workdir / "sessions.db"
+        self.stderr_path = self.workdir / "stderr.txt"
+        pid_path = self.workdir / "server.pid"
+        server = self.workdir / "stop_test_server.py"
+        server.write_text(STOP_TEST_SERVER, encoding="utf-8")
+
+        self.stderr_file = open(self.stderr_path, "wb")
+        self.proc = subprocess.Popen(
+            [
+                str(binary),
+                "--db", str(self.db_path),
+                "record", "--client", f"stop-test-{mode}", "--",
+                sys.executable, str(server), str(pid_path), mode,
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.stderr_file,
+            cwd=repo,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        )
+        assert self.proc.stdin is not None and self.proc.stdout is not None
+        self.proc.stdin.write(frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
+        self.proc.stdin.flush()
+        assert self.proc.stdout.readline().strip(), "no response forwarded from the server"
+        self.server_pid = int(pid_path.read_text(encoding="utf-8"))
+
+        # Storage trails forwarding; wait for both messages to be committed so
+        # every assertion below is about shutdown, not about a pending write.
+        assert self.wait_for(lambda: self.query("SELECT COUNT(*) FROM messages") == [(2,)], 15), (
+            "the exchange was not committed before the stop test began"
+        )
+
+    def query(self, sql: str) -> list[tuple]:
+        try:
+            conn = sqlite3.connect(self.db_path.as_uri() + "?mode=ro", uri=True, timeout=0.1)
+            try:
+                return conn.execute(sql).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            return []
+
+    def session_is_closed(self) -> bool:
+        return self.query("SELECT ended_at FROM sessions WHERE ended_at IS NOT NULL") != []
+
+    def wait_for(self, condition, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if condition():
+                return True
+            time.sleep(0.05)
+        return condition()
+
+    def send_stop(self, stop_signal: int) -> None:
+        self.proc.send_signal(stop_signal)
+
+    def wait(self, timeout: float) -> int:
+        try:
+            return self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(f"record did not exit within {timeout}s; stderr:\n{self.stderr()}")
+
+    def stderr(self) -> str:
+        self.stderr_file.flush()
+        return self.stderr_path.read_text(encoding="utf-8", errors="replace")
+
+    def close(self) -> None:
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait(timeout=10)
+        if process_is_running(self.server_pid):
+            # The server ignores SIGTERM; on Windows os.kill terminates outright.
+            os.kill(self.server_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        for stream in (self.proc.stdin, self.proc.stdout):
+            if stream is not None:
+                stream.close()
+        self.stderr_file.close()
+
+
+def test_stop_signal_finalizes_the_recording() -> None:
+    """Gap: an operator stop was only ever simulated by killing the recorder,
+    which abandons the session. A real stop signal must close the session with
+    its data intact, exit 0, and let a cooperative server exit on its own.
+
+    SIGTERM is exercised on Unix because it is how MCP clients and process
+    managers stop a server; it used to end the recorder with the session open.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    binary = build_recorder_binary(repo)
+
+    for stop_signal in stop_signals():
+        recording = StopTestRecording(repo, binary, "cooperative")
+        try:
+            # Client stdin stays open: only the signal can end this recording.
+            recording.send_stop(stop_signal)
+            returncode = recording.wait(timeout=20)
+            stderr = recording.stderr()
+        finally:
+            recording.close()
+
+        context = f"signal {stop_signal}; stderr:\n{stderr}"
+        assert returncode == 0, context
+        assert "stop requested; finalizing session" in stderr, context
+        assert "ended" in stderr, context
+        # A server that exits when its stdin closes is never killed.
+        assert "terminating" not in stderr, context
+        assert recording.session_is_closed(), context
+        assert recording.query("SELECT direction FROM messages ORDER BY seq") == [("c2s",), ("s2c",)]
+        assert not process_is_running(recording.server_pid), context
+
+
+def test_stubborn_server_is_terminated_after_the_reap_grace() -> None:
+    """A server that ignores stdin EOF must not outlive `record` or keep it
+    running: it gets the 5-second grace period, then is killed. The session is
+    closed before that wait starts, so a client that follows SIGTERM with
+    SIGKILL during the grace period cannot leave it unclosed."""
+    repo = Path(__file__).resolve().parent.parent
+    binary = build_recorder_binary(repo)
+
+    recording = StopTestRecording(repo, binary, "stubborn")
+    try:
+        started = time.monotonic()
+        recording.send_stop(stop_signals()[0])
+        assert recording.wait_for(recording.session_is_closed, 10), recording.stderr()
+        assert recording.proc.poll() is None, "record exited without waiting for the server"
+        returncode = recording.wait(timeout=30)
+        elapsed = time.monotonic() - started
+        stderr = recording.stderr()
+    finally:
+        recording.close()
+
+    assert returncode == 0, stderr
+    assert "did not exit within 5s; terminating it" in stderr, stderr
+    assert 4.5 <= elapsed < 25, f"exited after {elapsed:.1f}s; stderr:\n{stderr}"
+    assert not process_is_running(recording.server_pid), "the stubborn server was left running"
+
+
+def test_second_stop_signal_skips_the_reap_grace() -> None:
+    """Regression test: `tokio::signal::ctrl_c()` was awaited once, so the
+    first stop request consumed the only listener while Tokio's handler stayed
+    installed. A second Ctrl-C was silently swallowed for the whole grace
+    period. Now it terminates the server immediately."""
+    repo = Path(__file__).resolve().parent.parent
+    binary = build_recorder_binary(repo)
+
+    recording = StopTestRecording(repo, binary, "stubborn")
+    try:
+        stop_signal = stop_signals()[0]
+        recording.send_stop(stop_signal)
+        # The session closes before the reap wait, so this marks the start of it.
+        assert recording.wait_for(recording.session_is_closed, 10), recording.stderr()
+        assert recording.proc.poll() is None, "record exited without waiting for the server"
+
+        second_sent = time.monotonic()
+        recording.send_stop(stop_signal)
+        returncode = recording.wait(timeout=30)
+        elapsed = time.monotonic() - second_sent
+        stderr = recording.stderr()
+    finally:
+        recording.close()
+
+    assert returncode == 0, stderr
+    assert "stop requested again; terminating the MCP server now" in stderr, stderr
+    assert elapsed < 3.5, f"the second stop took {elapsed:.1f}s, so it waited out the grace"
+    assert not process_is_running(recording.server_pid), "the stubborn server was left running"
+
+
 if __name__ == "__main__":
     test_proxy_records_session()
     test_sessions_show_calls_json_correlates_exchanges()
@@ -4310,4 +4556,7 @@ if __name__ == "__main__":
     test_killed_recording_leaves_database_usable_for_a_new_session()
     test_mtrace_import_preserves_redaction_placeholder_and_policy()
     test_record_handles_a_long_session_under_write_batching()
+    test_stop_signal_finalizes_the_recording()
+    test_stubborn_server_is_terminated_after_the_reap_grace()
+    test_second_stop_signal_skips_the_reap_grace()
     print("integration test passed")
