@@ -4933,6 +4933,8 @@ def test_record_survives_a_database_lock_that_clears_mid_session() -> None:
     workdir = make_workdir(repo)
     db_path = workdir / "sessions.db"
     fake_server = repo / "tests" / "fake_mcp_server.py"
+    stderr_path = workdir / "stderr.txt"
+    stderr_file = open(stderr_path, "wb")
 
     proc = subprocess.Popen(
         [
@@ -4943,7 +4945,9 @@ def test_record_survives_a_database_lock_that_clears_mid_session() -> None:
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        # A file rather than a pipe, so the test can watch for the write
+        # failure while the recorder is still running.
+        stderr=stderr_file,
         cwd=repo,
     )
     try:
@@ -4968,12 +4972,11 @@ def test_record_survives_a_database_lock_that_clears_mid_session() -> None:
             time.sleep(0.05)
         assert committed == 2, "the first exchange was not committed before the lock test began"
 
-        # Hold an exclusive lock well past SQLite's 5-second busy_timeout, so
-        # the write attempt(s) made while it is held are guaranteed to fail
-        # rather than merely delayed.
+        # Hold an exclusive lock until the recorder reports that a write
+        # failed, so the loss is certain rather than a guess about how long
+        # SQLite's 5-second busy timeout really takes on this host.
         locker = sqlite3.connect(db_path, timeout=0.1)
         locker.execute("BEGIN EXCLUSIVE")
-        lock_acquired = time.monotonic()
 
         proc.stdin.write(frame({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -4992,9 +4995,12 @@ def test_record_survives_a_database_lock_that_clears_mid_session() -> None:
             "forward-before-record must never block on storage contention"
         )
 
-        remaining = (lock_acquired + 6.5) - time.monotonic()
-        if remaining > 0:
-            time.sleep(remaining)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if b"failed to write MCP message batch" in stderr_path.read_bytes():
+                break
+            time.sleep(0.1)
+        write_failed = b"failed to write MCP message batch" in stderr_path.read_bytes()
         locker.rollback()
         locker.close()
 
@@ -5003,17 +5009,19 @@ def test_record_survives_a_database_lock_that_clears_mid_session() -> None:
             "params": {"name": "echo", "arguments": {"message": "after-lock"}},
         }))
         proc.stdin.flush()
+        assert write_failed, "the recorder never reported a failed write while the database was locked"
         after_lock_response = proc.stdout.readline()
         assert b"after-lock" in after_lock_response, "recording did not resume after the lock cleared"
 
         proc.stdin.close()
         returncode = proc.wait(timeout=20)
-        stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
     finally:
         stop_process(proc)
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
+        for stream in (proc.stdin, proc.stdout):
             if stream is not None:
                 stream.close()
+        stderr_file.close()
+    stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
 
     # The loss must be reported, never silent (never exit 0 with data missing).
     assert returncode != 0, stderr

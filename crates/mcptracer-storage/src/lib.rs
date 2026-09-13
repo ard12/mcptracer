@@ -3133,10 +3133,11 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(
-            // Each attempt's busy wait is capped at the remaining budget, so
-            // the overrun is one 50 ms retry sleep plus scheduling, not a
-            // whole busy timeout (which reached 9.5s on a macOS runner).
-            elapsed < SCHEMA_LOCK_RETRY_BUDGET + Duration::from_secs(2),
+            // Seconds, not minutes: the count-bounded loop blocked for over
+            // two minutes. SQLite's busy handler overshoots its timeout by a
+            // platform-dependent amount (7.4s total observed on macOS runners),
+            // so the margin is generous rather than tied to one host's timing.
+            elapsed < SCHEMA_LOCK_RETRY_BUDGET + Duration::from_secs(10),
             "took {elapsed:?} to give up on a permanently locked database; \
              the retry loop must be bounded by wall-clock time"
         );
