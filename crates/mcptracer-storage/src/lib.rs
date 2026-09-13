@@ -122,19 +122,25 @@ pub mod vcr;
 
 const CURRENT_SCHEMA_VERSION: i64 = 5;
 
+/// How long any statement waits on another connection's lock before failing.
+/// Applied once the schema is ready; opening uses the shorter of this and
+/// whatever remains of `SCHEMA_LOCK_RETRY_BUDGET`.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 const CONNECTION_PRAGMAS: &str = r#"
-PRAGMA busy_timeout = 5000;
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA synchronous = NORMAL;
 "#;
 
-/// Wall-clock ceiling on the schema-init retry loop in [`Store::init_schema`].
-/// Matches the `busy_timeout` above: a single attempt can itself block for
-/// up to that long inside SQLite's busy handler, so bounding retries by
-/// *count* rather than elapsed time let a database locked by another
-/// process (not just the brief startup race this loop exists for) multiply
-/// that timeout up to a hundredfold and hang `Store::open` for minutes.
+/// Wall-clock ceiling on opening a database another connection holds locked,
+/// enforced by [`Store::init_schema`]. A single attempt can block inside
+/// SQLite's busy handler, so bounding retries by *count* let a database locked
+/// by another process (not just the brief startup race the retries exist for)
+/// multiply the busy timeout up to a hundredfold and hang `Store::open` for
+/// minutes. Each attempt's busy wait is also capped at the time remaining, or
+/// one that starts just before the deadline could still overrun it by a whole
+/// busy timeout.
 const SCHEMA_LOCK_RETRY_BUDGET: Duration = Duration::from_secs(5);
 
 const SCHEMA_BOOTSTRAP: &str = r#"
@@ -450,6 +456,10 @@ impl Store {
         // `SCHEMA_LOCK_RETRY_BUDGET`.
         let deadline = std::time::Instant::now() + SCHEMA_LOCK_RETRY_BUDGET;
         loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            // A zero busy timeout would disable the busy handler entirely.
+            self.conn
+                .busy_timeout(remaining.clamp(Duration::from_millis(1), BUSY_TIMEOUT))?;
             match self.init_schema_once() {
                 Err(error)
                     if is_database_lock_error(&error) && std::time::Instant::now() < deadline =>
@@ -462,7 +472,11 @@ impl Store {
                          gave up waiting for it to become available",
                     ));
                 }
-                result => return result,
+                Err(error) => return Err(error),
+                Ok(()) => {
+                    self.conn.busy_timeout(BUSY_TIMEOUT)?;
+                    return Ok(());
+                }
             }
         }
     }
@@ -3119,7 +3133,10 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(
-            elapsed < SCHEMA_LOCK_RETRY_BUDGET + Duration::from_secs(3),
+            // Each attempt's busy wait is capped at the remaining budget, so
+            // the overrun is one 50 ms retry sleep plus scheduling, not a
+            // whole busy timeout (which reached 9.5s on a macOS runner).
+            elapsed < SCHEMA_LOCK_RETRY_BUDGET + Duration::from_secs(2),
             "took {elapsed:?} to give up on a permanently locked database; \
              the retry loop must be bounded by wall-clock time"
         );

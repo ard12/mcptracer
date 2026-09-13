@@ -100,7 +100,7 @@
     "crates/mcptracer-storage/LICENSE": "0e7409c420bd7d09b24b918f463d5469e2a04f1933ae73a1ce0cef6e9d57bb87",
     "crates/mcptracer-storage/NOTICE": "0473d8dbff728a1b467f6fd1e52b3e74c9b19ca64d92587a636431463713649e",
     "crates/mcptracer-storage/src/graph.rs": "8d1f4aa4047fd0aade15dc6736ad973c0211a2c43b5dce22afbec3e671997ec7",
-    "crates/mcptracer-storage/src/lib.rs": "ea4074a26ce8e1c3dfedf324bb2d8a423eba76e27984f2074fb1785ea0edbf94",
+    "crates/mcptracer-storage/src/lib.rs": "8011d243e5bbe621147a2bd89b79f3788155dc23039f9dd9243cb9b78ceb4f96",
     "crates/mcptracer-storage/src/mtrace.rs": "e03b76091c593f92b6336054bc94699cef5b660c872bd4f434b2d8436e00cb14",
     "crates/mcptracer-storage/src/vcr.rs": "6790b592800f7568ec6d7d7a4aefada4b296ee78c736f4a7fb9b021617691751",
     "dist/homebrew/mcptracer.rb.tmpl": "39046b770746ae258ec64b97727d883f5ce5a49b5b8f4ca64a7eb5db7c5903cd",
@@ -275,7 +275,7 @@
     "docs-site/src/architecture/intelligence-layer.md",
     "docs-site/src/architecture/phase1.md"
   ],
-  "source_commit": "5bd73d158c8d2b8bbbadfb560bf44762c50259ed",
+  "source_commit": "8b1c3308618fc8bceeb773641e1bc654291a1341",
   "source_policy_sha256": "ea5598816ae570b06b3afc631ef926bf3c38db1d11dd04fc7bbd07b11d84a3ad",
   "unhashed_generated_files": [
     "OSS_EXPORT_MANIFEST.json"
