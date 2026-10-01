@@ -92,6 +92,7 @@ fn exchange_to_span(trace_id: &str, index: usize, exchange: &Exchange) -> Value 
         ExchangeStatus::Error => (STATUS_CODE_ERROR, Some("error response")),
         ExchangeStatus::ToolError => (STATUS_CODE_ERROR, Some("tool execution error")),
         ExchangeStatus::Unanswered => (STATUS_CODE_ERROR, Some("unanswered request")),
+        ExchangeStatus::Cancelled => (STATUS_CODE_UNSET, Some("request cancelled")),
         ExchangeStatus::OrphanResponse => (STATUS_CODE_UNSET, None),
     };
     let mut status = json!({"code": status_code});

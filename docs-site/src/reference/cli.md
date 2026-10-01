@@ -29,12 +29,13 @@ Commands:
   export       Write one validated, redaction-safe session artifact
   import       Import a local `.mtrace` artifact without executing its contents
   verify       Offline-verify a `.mtrace` artifact (and, if recorded, a baseline or assertion spec) against an evidence manifest's recorded digests
-  index        Rebuild or inspect the derived memory index over recorded sessions
+  index        Rebuild or inspect the derived memory index over recorded sessions (Labs; requires the `labs` feature)
   inspect      Read-only local web UI over recorded sessions (session list + timeline)
-  route        Recommend next commands for a session from the derived index and stats
-  optimize     Mine recorded history for latency/assertion/bench suggestions
-  graph        Export the temporal tool memory graph as JSONL or DOT
+  route        Recommend next commands for a session from the derived index and stats (Labs; requires the `labs` feature)
+  optimize     Mine recorded history for latency/assertion/bench suggestions (Labs; requires the `labs` feature)
+  graph        Export the temporal tool memory graph as JSONL or DOT (Labs; requires the `labs` feature)
   quota        Evaluate token-burst and rate-limit survival offline, labeling reported vs estimated counts
+  semantic     Experimental local lexical search over the derived index (off by default at build time; requires the `semantic-search` feature)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -97,11 +98,13 @@ Safely wrap configured stdio MCP servers for a supported client
 Usage: mcptracer setup [OPTIONS] [CLIENT]
 
 Arguments:
-  [CLIENT]  Client configuration to update [possible values: claude-desktop, cursor, codex, vscode]
+  [CLIENT]  Client configuration to update [possible values: claude-desktop, claude-code, cursor, codex, vscode]
 
 Options:
       --db <DB>
       --undo             Restore the pre-MCPTracer backup. Without a client, restores every supported default configuration that has an MCPTracer backup
+      --force            Restore a setup backup even when its ownership metadata is missing or the active configuration changed after setup. Review both files first
+      --all              Wrap all detected clients that have configured stdio MCP servers
       --config <CONFIG>  Override the discovered client configuration path
   -h, --help             Print help
 ```
@@ -273,6 +276,8 @@ Options:
           Skip latency comparison entirely
       --latency-threshold-pct <LATENCY_THRESHOLD_PCT>
           Report latency deltas only when the relative change exceeds this percentage (and the absolute change exceeds 1ms) [default: 20]
+      --explain-schema
+          Add bounded advisory explanations for supported tool input/output schema changes. With --json, emit the versioned schema-explanation envelope
       --exit-zero
           Always exit 0, even when differences are found
       --sarif <PATH>
@@ -489,7 +494,7 @@ Options:
 ## `mcptracer index`
 
 ```text
-Rebuild or inspect the derived memory index over recorded sessions
+Rebuild or inspect the derived memory index over recorded sessions (Labs; requires the `labs` feature)
 
 Usage: mcptracer index [OPTIONS] <COMMAND>
 
@@ -506,7 +511,7 @@ Options:
 ## `mcptracer route`
 
 ```text
-Recommend next commands for a session from the derived index and stats
+Recommend next commands for a session from the derived index and stats (Labs; requires the `labs` feature)
 
 Usage: mcptracer route [OPTIONS] <SESSION_ID>
 
@@ -527,7 +532,7 @@ Options:
 ## `mcptracer optimize`
 
 ```text
-Mine recorded history for latency/assertion/bench suggestions
+Mine recorded history for latency/assertion/bench suggestions (Labs; requires the `labs` feature)
 
 Usage: mcptracer optimize [OPTIONS]
 
@@ -541,7 +546,7 @@ Options:
 ## `mcptracer graph`
 
 ```text
-Export the temporal tool memory graph as JSONL or DOT
+Export the temporal tool memory graph as JSONL or DOT (Labs; requires the `labs` feature)
 
 Usage: mcptracer graph [OPTIONS]
 
@@ -569,5 +574,23 @@ Options:
       --listen <LISTEN>     Local address to serve the read-only inspector UI on [default: 127.0.0.1:4317]
       --allow-non-loopback  Permit binding the inspector UI to a non-loopback address
   -h, --help                Print help
+```
+
+## `mcptracer semantic`
+
+```text
+Experimental local lexical search over the derived index (off by default at build time; requires the `semantic-search` feature)
+
+Usage: mcptracer semantic [OPTIONS] <QUERY>
+
+Arguments:
+  <QUERY>  Search query
+
+Options:
+      --allow-unredacted  Include sessions recorded with redaction policy `none` in the index
+      --db <DB>
+      --limit <LIMIT>     Maximum number of results [default: 10]
+      --json              Print results as JSON
+  -h, --help              Print help
 ```
 

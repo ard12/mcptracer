@@ -9,6 +9,7 @@ looks like on the wire).
 import json
 import os
 import sys
+import time
 
 VARIANT = os.environ.get("FAKE_MCP_VARIANT", "")
 ECHO_PREFIX = "Echo2: " if VARIANT == "changed" else "Echo: "
@@ -17,6 +18,14 @@ ECHO_DESCRIPTION = (
     if VARIANT == "changed"
     else "Echo back the input"
 )
+ECHO_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {"message": {"type": "string"}},
+    "required": ["message"],
+}
+if os.environ.get("FAKE_MCP_SCHEMA_VARIANT") == "required-added":
+    ECHO_INPUT_SCHEMA["properties"]["format"] = {"type": "string", "enum": ["plain", "json"]}
+    ECHO_INPUT_SCHEMA["required"].append("format")
 
 
 def send_message(message: dict) -> None:
@@ -65,11 +74,7 @@ def main() -> None:
                             {
                                 "name": "echo",
                                 "description": ECHO_DESCRIPTION,
-                                "inputSchema": {
-                                    "type": "object",
-                                    "properties": {"message": {"type": "string"}},
-                                    "required": ["message"],
-                                },
+                                "inputSchema": ECHO_INPUT_SCHEMA,
                             }
                         ]
                     },
@@ -79,6 +84,9 @@ def main() -> None:
             tool = message.get("params", {}).get("name")
             if tool == "echo":
                 text = message.get("params", {}).get("arguments", {}).get("message", "")
+                delay_ms = min(max(float(os.environ.get("FAKE_MCP_DELAY_MS", "0")), 0.0), 1000.0)
+                if delay_ms:
+                    time.sleep(delay_ms / 1000.0)
                 send_message(
                     {
                         "jsonrpc": "2.0",

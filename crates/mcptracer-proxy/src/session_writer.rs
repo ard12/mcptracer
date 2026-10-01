@@ -35,12 +35,17 @@ type StorageClose = (i64, u64, mpsc::Sender<std::result::Result<(), String>>);
 pub enum StorageEvent {
     Message {
         message: McpMessage,
-        reserved_bytes: usize,
+        reservation: QueueReservation,
     },
     Close {
         ended_at_ns: i64,
         dropped_messages: u64,
         done_tx: mpsc::Sender<std::result::Result<(), String>>,
+    },
+    #[cfg(test)]
+    TestBarrier {
+        entered_tx: mpsc::Sender<()>,
+        release_rx: mpsc::Receiver<()>,
     },
 }
 
@@ -49,14 +54,28 @@ pub enum StorageEvent {
 /// forwarding path into a blocking operation.
 pub struct StorageQueueBudget {
     max_bytes: usize,
-    queued_bytes: AtomicUsize,
+    queued_bytes: Arc<AtomicUsize>,
+}
+
+/// Owns one byte reservation for exactly as long as its queued event lives.
+/// Dropping an event on channel teardown, writer failure, or normal batch
+/// completion returns the reservation once through Rust's ownership rules.
+pub(crate) struct QueueReservation {
+    queued_bytes: Arc<AtomicUsize>,
+    bytes: usize,
+}
+
+impl Drop for QueueReservation {
+    fn drop(&mut self) {
+        self.queued_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
 }
 
 impl StorageQueueBudget {
     pub fn new(max_bytes: usize) -> Self {
         Self {
             max_bytes,
-            queued_bytes: AtomicUsize::new(0),
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -81,8 +100,11 @@ impl StorageQueueBudget {
         }
     }
 
-    fn release(&self, bytes: usize) {
-        self.queued_bytes.fetch_sub(bytes, Ordering::AcqRel);
+    fn reserve_event(&self, bytes: usize) -> Option<QueueReservation> {
+        self.try_reserve(bytes).then(|| QueueReservation {
+            queued_bytes: Arc::clone(&self.queued_bytes),
+            bytes,
+        })
     }
 
     #[cfg(test)]
@@ -147,19 +169,21 @@ pub fn redact_server_command(server_args: &[String]) -> String {
 
 fn collect_storage_event(
     event: StorageEvent,
-    messages: &mut Vec<(McpMessage, usize)>,
+    messages: &mut Vec<(McpMessage, QueueReservation)>,
     close: &mut Option<StorageClose>,
 ) {
     match event {
         StorageEvent::Message {
             message,
-            reserved_bytes,
-        } => messages.push((message, reserved_bytes)),
+            reservation,
+        } => messages.push((message, reservation)),
         StorageEvent::Close {
             ended_at_ns,
             dropped_messages,
             done_tx,
         } => *close = Some((ended_at_ns, dropped_messages, done_tx)),
+        #[cfg(test)]
+        StorageEvent::TestBarrier { .. } => unreachable!("test barrier handled by writer"),
     }
 }
 
@@ -171,13 +195,26 @@ pub fn spawn_storage_writer(
     session_id: String,
     redactor: Redactor,
     rx: Receiver<StorageEvent>,
-    queue_budget: Arc<StorageQueueBudget>,
+    _queue_budget: Arc<StorageQueueBudget>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut failed_message_records = 0_u64;
         let mut first_failure: Option<String> = None;
 
         while let Ok(event) = rx.recv() {
+            #[cfg(test)]
+            let event = match event {
+                StorageEvent::TestBarrier {
+                    entered_tx,
+                    release_rx,
+                } => {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.recv();
+                    continue;
+                }
+                event => event,
+            };
+
             let mut messages = Vec::with_capacity(STORAGE_WRITE_BATCH_MESSAGES);
             let mut close = None;
 
@@ -203,9 +240,7 @@ pub fn spawn_storage_writer(
                         "failed to persist one or more MCP message records".to_string()
                     });
                 }
-                for (_, reserved_bytes) in messages {
-                    queue_budget.release(reserved_bytes);
-                }
+                drop(messages);
             }
 
             let Some((ended_at_ns, dropped_messages, done_tx)) = close else {
@@ -255,7 +290,7 @@ pub fn finish_storage_writer(
             dropped_messages,
             done_tx,
         })
-        .context("storage writer stopped before the session could be finalized")?;
+        .map_err(|_| anyhow!("storage writer stopped before the session could be finalized"))?;
     drop(storage_tx);
 
     let result = done_rx
@@ -380,24 +415,22 @@ pub fn try_record(
     let reserved_bytes = message
         .payload_bytes
         .saturating_add(STORAGE_EVENT_OVERHEAD_BYTES);
-    if !queue_budget.try_reserve(reserved_bytes) {
+    let Some(reservation) = queue_budget.reserve_event(reserved_bytes) else {
         dropped_messages.fetch_add(1, Ordering::Relaxed);
         warn!("storage queue byte budget exhausted; dropped MCP message record");
         return;
-    }
+    };
 
     match storage_tx.try_send(StorageEvent::Message {
         message,
-        reserved_bytes,
+        reservation,
     }) {
         Ok(()) => {}
-        Err(TrySendError::Full(StorageEvent::Message { reserved_bytes, .. })) => {
-            queue_budget.release(reserved_bytes);
+        Err(TrySendError::Full(StorageEvent::Message { .. })) => {
             dropped_messages.fetch_add(1, Ordering::Relaxed);
             warn!("storage channel full; dropped MCP message record");
         }
-        Err(TrySendError::Disconnected(StorageEvent::Message { reserved_bytes, .. })) => {
-            queue_budget.release(reserved_bytes);
+        Err(TrySendError::Disconnected(StorageEvent::Message { .. })) => {
             dropped_messages.fetch_add(1, Ordering::Relaxed);
             warn!("storage writer disconnected; dropped MCP message record");
         }
@@ -416,6 +449,7 @@ pub fn now_ns() -> i64 {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{mpsc, Arc};
+    use std::time::Duration;
 
     use mcptracer_protocol::Direction;
     use mcptracer_redact::{RedactionPolicy, Redactor};
@@ -440,6 +474,254 @@ mod tests {
         }
     }
 
+    fn message_with_payload_bytes(seq: u64, payload_bytes: usize) -> McpMessage {
+        McpMessage {
+            payload_bytes,
+            ..message(seq)
+        }
+    }
+
+    /// Deliberately simple reference model: it owns its own counters and does
+    /// not call the production reservation or channel helpers.
+    struct QueueReference {
+        max_events: usize,
+        max_bytes: usize,
+        events: usize,
+        bytes: usize,
+        dropped: u64,
+        reservations: Vec<usize>,
+        closed: bool,
+    }
+
+    impl QueueReference {
+        fn new(max_events: usize, max_bytes: usize) -> Self {
+            Self {
+                max_events,
+                max_bytes,
+                events: 0,
+                bytes: 0,
+                dropped: 0,
+                reservations: Vec::new(),
+                closed: false,
+            }
+        }
+
+        fn admit(&mut self, bytes: usize) -> bool {
+            if self.closed || self.events == self.max_events || bytes > self.max_bytes - self.bytes
+            {
+                self.dropped += 1;
+                return false;
+            }
+            self.events += 1;
+            self.bytes += bytes;
+            self.reservations.push(bytes);
+            true
+        }
+
+        fn release_one(&mut self) {
+            let bytes = self.reservations.pop().expect("owned reservation");
+            self.events -= 1;
+            self.bytes -= bytes;
+        }
+
+        fn close(&mut self) {
+            while !self.reservations.is_empty() {
+                self.release_one();
+            }
+            self.closed = true;
+        }
+    }
+
+    fn pause_writer(tx: &mpsc::SyncSender<super::StorageEvent>) -> mpsc::Sender<()> {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        tx.send(super::StorageEvent::TestBarrier {
+            entered_tx,
+            release_rx,
+        })
+        .unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer must enter the deterministic barrier before the deadline");
+        release_tx
+    }
+
+    fn finish_before_deadline(
+        tx: mpsc::SyncSender<super::StorageEvent>,
+        writer: std::thread::JoinHandle<()>,
+        dropped: u64,
+    ) -> anyhow::Result<()> {
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = finish_storage_writer(tx, writer, 1, dropped);
+            let _ = done_tx.send(result);
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("storage writer shutdown must complete before the deadline")
+    }
+
+    fn assert_saturation_case(max_events: usize, max_bytes: usize, attempts: usize) {
+        let store = Store::open_in_memory().unwrap();
+        let session_id = store
+            .create_session("queue-test", "server", "stdio", 0)
+            .unwrap();
+        let (tx, rx) = mpsc::sync_channel(max_events);
+        let budget = Arc::new(StorageQueueBudget::new(max_bytes));
+        let writer = spawn_storage_writer(
+            store,
+            session_id,
+            Redactor::new(RedactionPolicy::None),
+            rx,
+            Arc::clone(&budget),
+        );
+        let release_tx = pause_writer(&tx);
+        let mut model = QueueReference::new(max_events, max_bytes);
+        let dropped = AtomicU64::new(0);
+        let reservation = 48 + super::STORAGE_EVENT_OVERHEAD_BYTES;
+
+        for seq in 0..attempts as u64 {
+            let expected_admitted = model.admit(reservation);
+            try_record(&tx, message_with_payload_bytes(seq, 48), &dropped, &budget);
+            assert_eq!(dropped.load(Ordering::Relaxed), model.dropped);
+            assert_eq!(budget.queued_bytes(), model.bytes);
+            assert!(model.bytes <= max_bytes, "reference budget exceeded");
+            assert_eq!(
+                expected_admitted,
+                (seq as usize) < max_events && (seq as usize + 1) * reservation <= max_bytes
+            );
+        }
+        assert!(model.dropped > 0, "the saturation guard must be exercised");
+
+        release_tx.send(()).unwrap();
+        model.close();
+        model.close(); // repeated cleanup is idempotent in the independent oracle
+        let result = finish_before_deadline(tx, writer, model.dropped).unwrap_err();
+        assert!(result.to_string().contains("capture lost"), "{result}");
+        assert_eq!(
+            budget.queued_bytes(),
+            0,
+            "close must release every reservation"
+        );
+        assert_eq!(model.bytes, 0);
+        assert_eq!(model.events, 0);
+    }
+
+    #[test]
+    fn bounded_reference_sequence_matches_admit_release_drop_and_repeated_close() {
+        let reservation = 48 + super::STORAGE_EVENT_OVERHEAD_BYTES;
+        let (tx, rx) = mpsc::sync_channel(2);
+        let budget = StorageQueueBudget::new(2 * reservation);
+        let dropped = AtomicU64::new(0);
+        let mut model = QueueReference::new(2, 2 * reservation);
+
+        for seq in 0..2 {
+            assert!(model.admit(reservation));
+            try_record(&tx, message(seq), &dropped, &budget);
+            assert_eq!(budget.queued_bytes(), model.bytes);
+            assert_eq!(dropped.load(Ordering::Relaxed), model.dropped);
+        }
+        assert!(!model.admit(reservation));
+        try_record(&tx, message(2), &dropped, &budget);
+        assert_eq!(budget.queued_bytes(), model.bytes);
+        assert_eq!(dropped.load(Ordering::Relaxed), model.dropped);
+
+        // Releasing one owned queue event makes exactly one reservation
+        // available again; a later admission consumes that room.
+        drop(rx.try_recv().unwrap());
+        model.release_one();
+        assert_eq!(budget.queued_bytes(), model.bytes);
+        assert!(model.admit(reservation));
+        try_record(&tx, message(3), &dropped, &budget);
+        assert_eq!(budget.queued_bytes(), model.bytes);
+        assert_eq!(dropped.load(Ordering::Relaxed), model.dropped);
+
+        drop(rx);
+        model.close();
+        model.close();
+        assert_eq!(budget.queued_bytes(), 0);
+        assert_eq!(model.bytes, 0);
+        assert_eq!(model.events, 0);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn writer_barrier_proves_channel_slot_saturation_and_cleanup() {
+        // Keep the byte ceiling high so only the event-slot bound is reached.
+        assert_saturation_case(2, 16 * 1024, 4);
+    }
+
+    #[test]
+    fn writer_barrier_proves_byte_budget_saturation_before_slot_capacity() {
+        // Eight slots are available, but only two message reservations fit.
+        assert_saturation_case(8, 2 * (48 + super::STORAGE_EVENT_OVERHEAD_BYTES), 4);
+    }
+
+    #[test]
+    fn writer_barrier_control_completes_without_pressure() {
+        let store = Store::open_in_memory().unwrap();
+        let session_id = store
+            .create_session("queue-control", "server", "stdio", 0)
+            .unwrap();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let budget = Arc::new(StorageQueueBudget::new(16 * 1024));
+        let writer = spawn_storage_writer(
+            store,
+            session_id,
+            Redactor::new(RedactionPolicy::None),
+            rx,
+            Arc::clone(&budget),
+        );
+        let release_tx = pause_writer(&tx);
+        let dropped = AtomicU64::new(0);
+        let mut model = QueueReference::new(4, 16 * 1024);
+        for seq in 0..2 {
+            assert!(model.admit(48 + super::STORAGE_EVENT_OVERHEAD_BYTES));
+            try_record(&tx, message(seq), &dropped, &budget);
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(budget.queued_bytes(), model.bytes);
+        release_tx.send(()).unwrap();
+        model.close();
+        finish_before_deadline(tx, writer, model.dropped).unwrap();
+        assert_eq!(budget.queued_bytes(), 0);
+    }
+
+    #[test]
+    fn dropping_a_paused_writer_queue_reclaims_queued_reservations() {
+        let (tx, rx) = mpsc::sync_channel(2);
+        let dropped = AtomicU64::new(0);
+        let budget = StorageQueueBudget::new(4096);
+        try_record(&tx, message(0), &dropped, &budget);
+        try_record(&tx, message(1), &dropped, &budget);
+        assert_eq!(
+            budget.queued_bytes(),
+            2 * (48 + super::STORAGE_EVENT_OVERHEAD_BYTES)
+        );
+        drop(rx);
+        assert_eq!(
+            budget.queued_bytes(),
+            0,
+            "channel teardown drops owned reservations"
+        );
+        // A post-disconnect attempt is rejected and has no reservation left to
+        // release a second time.
+        try_record(&tx, message(2), &dropped, &budget);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(budget.queued_bytes(), 0);
+    }
+
+    #[test]
+    fn disconnected_writer_returns_its_reservation_once() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let dropped = AtomicU64::new(0);
+        let budget = StorageQueueBudget::new(4096);
+        drop(rx);
+        try_record(&tx, message(0), &dropped, &budget);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(budget.queued_bytes(), 0);
+    }
+
     #[test]
     fn byte_budget_admits_exactly_the_real_cap_and_refuses_one_byte_past_it() {
         // The other budget tests substitute small synthetic ceilings (1_500 and
@@ -450,23 +732,28 @@ mod tests {
 
         // Exactly at the cap must be admitted - the cap is inclusive, so a
         // payload sized precisely to it is valid traffic, not an overflow.
-        assert!(budget.try_reserve(STORAGE_QUEUE_MAX_BYTES));
+        let full_reservation = budget
+            .reserve_event(STORAGE_QUEUE_MAX_BYTES)
+            .expect("the exact queue cap must be reservable");
         assert_eq!(budget.queued_bytes(), STORAGE_QUEUE_MAX_BYTES);
         assert!(
-            !budget.try_reserve(1),
+            budget.reserve_event(1).is_none(),
             "a budget reserved to its cap must refuse even a single further byte"
         );
 
-        budget.release(STORAGE_QUEUE_MAX_BYTES);
+        drop(full_reservation);
         assert_eq!(budget.queued_bytes(), 0);
 
         // Just under, then the byte that lands exactly on the cap.
-        assert!(budget.try_reserve(STORAGE_QUEUE_MAX_BYTES - 1));
-        assert!(
-            budget.try_reserve(1),
-            "the final byte up to the cap must still fit"
-        );
-        assert!(!budget.try_reserve(1));
+        let almost_full = budget
+            .reserve_event(STORAGE_QUEUE_MAX_BYTES - 1)
+            .expect("the budget must admit all but one byte");
+        let final_byte = budget
+            .reserve_event(1)
+            .expect("the final byte up to the cap must still fit");
+        assert!(budget.reserve_event(1).is_none());
+        drop((almost_full, final_byte));
+        assert_eq!(budget.queued_bytes(), 0);
 
         // A single reservation larger than the whole budget can never fit, and
         // must fail rather than overflow the subtraction that computes room.
@@ -650,8 +937,16 @@ mod tests {
 
     #[test]
     fn writer_reports_sqlite_message_failures_at_session_close() {
-        let store = Store::open_in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "mcptracer-writer-failure-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("sessions.db");
+        let store = Store::open(&db_path).unwrap();
         let session_id = store.create_session("test", "server", "stdio", 0).unwrap();
+        let session_id_for_check = session_id.clone();
         let (tx, rx) = mpsc::sync_channel(4);
         let budget = Arc::new(StorageQueueBudget::new(4 * 1024));
         let writer = spawn_storage_writer(
@@ -661,15 +956,43 @@ mod tests {
             rx,
             Arc::clone(&budget),
         );
-
+        let release_tx = pause_writer(&tx);
         let dropped = AtomicU64::new(0);
-        try_record(&tx, message(0), &dropped, &budget);
-        try_record(&tx, message(0), &dropped, &budget);
+        let mut model = QueueReference::new(4, 4 * 1024);
+        for _ in 0..2 {
+            assert!(model.admit(48 + super::STORAGE_EVENT_OVERHEAD_BYTES));
+            try_record(&tx, message(0), &dropped, &budget);
+        }
+        assert_eq!(budget.queued_bytes(), model.bytes);
+        release_tx.send(()).unwrap();
+        model.close();
+        model.close();
 
-        let err = finish_storage_writer(tx, writer, 1, 0).unwrap_err();
+        let err = finish_before_deadline(tx, writer, model.dropped).unwrap_err();
         assert!(err
             .to_string()
             .contains("failed to persist one or more MCP message records"));
         assert_eq!(budget.queued_bytes(), 0);
+
+        let store = Store::open(&db_path).unwrap();
+        let summary = store.get_session_summary(&session_id_for_check).unwrap();
+        assert_eq!(
+            summary.total_messages, 0,
+            "the failed transaction is atomic"
+        );
+        assert_eq!(
+            summary.dropped_messages, 2,
+            "failed records are persisted as drops"
+        );
+        let report = mcptracer_model::validate_session(
+            &store.get_messages(&session_id_for_check).unwrap(),
+            summary.dropped_messages as u64,
+        );
+        assert!(
+            !report.is_healthy(),
+            "a session with persistence loss must fail health validation"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

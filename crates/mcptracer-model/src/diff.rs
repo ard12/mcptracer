@@ -16,7 +16,7 @@
 //! - Orphan responses are excluded from alignment; they are anomalies surfaced
 //!   by the session model itself, not comparable calls.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mcptracer_redact::REDACTED_PLACEHOLDER;
 use mcptracer_storage::StoredMessage;
@@ -220,7 +220,11 @@ pub struct ToolDef {
 /// (`tools_pinned` assertion) — a rug pull changes this hash even when only
 /// an annotation or the output schema is edited, not just the description.
 pub fn tool_hash(name: &str, def: &ToolDef) -> String {
-    let canonical = serde_json::json!({
+    sha256_hex(&tool_identity_canonical(name, def))
+}
+
+fn tool_identity_canonical(name: &str, def: &ToolDef) -> String {
+    let identity = serde_json::json!({
         "name": name,
         "title": def.title,
         "description": def.description,
@@ -228,7 +232,7 @@ pub fn tool_hash(name: &str, def: &ToolDef) -> String {
         "outputSchema": def.output_schema,
         "annotations": def.annotations,
     });
-    sha256_hex(&canonical.to_string())
+    identity.to_string()
 }
 
 fn sha256_hex(text: &str) -> String {
@@ -866,6 +870,803 @@ pub fn extract_tool_catalog(msgs: &[StoredMessage]) -> ToolCatalog {
 pub fn extract_tools(msgs: &[StoredMessage]) -> BTreeMap<String, ToolDef> {
     extract_tool_catalog(msgs).tools
 }
+
+/// Schema direction being described by an opt-in T-105 explanation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSchemaKind {
+    Input,
+    Output,
+}
+
+impl ToolSchemaKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        }
+    }
+}
+
+/// Advisory classification; it never changes diff gating or approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaChangeClassification {
+    PotentiallyBreaking,
+    PotentiallyNonBreaking,
+    Ambiguous,
+    Unclassified,
+}
+
+/// One redacted, deterministic explanation for a tool-schema change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SchemaChangeExplanation {
+    pub tool: String,
+    pub schema: ToolSchemaKind,
+    /// RFC 6901 pointer relative to the inputSchema or outputSchema root.
+    pub pointer: String,
+    pub rule_id: String,
+    pub classification: SchemaChangeClassification,
+    pub before_summary: String,
+    pub after_summary: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsupported_keywords: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaAnalysisStatus {
+    Complete,
+    IncompleteCatalog,
+    Truncated,
+}
+
+/// Analysis metadata and findings used only by the opt-in schema explanation
+/// presentation. This is separate from `DiffReport` so its envelope stays
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolSchemaExplanationAnalysis {
+    pub baseline_catalog_complete: bool,
+    pub candidate_catalog_complete: bool,
+    pub analysis_status: SchemaAnalysisStatus,
+    pub schema_explanations: Vec<SchemaChangeExplanation>,
+}
+
+const MAX_SCHEMA_DEPTH: usize = 16;
+const MAX_SCHEMA_NODES: usize = 2048;
+const MAX_SCHEMA_EXPLANATIONS: usize = 100;
+
+/// Explain a deliberately small JSON Schema subset. Incomplete tool catalogs
+/// yield no compatibility claims; the existing security finding remains the
+/// actual gate. Enum members and all free-text values are withheld.
+pub fn explain_tool_schema_changes(
+    baseline_messages: &[StoredMessage],
+    candidate_messages: &[StoredMessage],
+) -> ToolSchemaExplanationAnalysis {
+    let baseline = extract_tool_catalog(baseline_messages);
+    let candidate = extract_tool_catalog(candidate_messages);
+    if !baseline.complete || !candidate.complete {
+        return ToolSchemaExplanationAnalysis {
+            baseline_catalog_complete: baseline.complete,
+            candidate_catalog_complete: candidate.complete,
+            analysis_status: SchemaAnalysisStatus::IncompleteCatalog,
+            schema_explanations: Vec::new(),
+        };
+    }
+
+    let mut schema_explanations = Vec::new();
+    let mut truncated = false;
+    for (tool_name, before) in &baseline.tools {
+        let Some(after) = candidate.tools.get(tool_name) else {
+            continue;
+        };
+        for (kind, before_schema, after_schema) in [
+            (
+                ToolSchemaKind::Input,
+                &before.input_schema,
+                &after.input_schema,
+            ),
+            (
+                ToolSchemaKind::Output,
+                &before.output_schema,
+                &after.output_schema,
+            ),
+        ] {
+            if before_schema == after_schema {
+                continue;
+            }
+            match (before_schema.as_ref(), after_schema.as_ref()) {
+                (Some(before_schema), Some(after_schema)) => {
+                    let mut nodes = 0;
+                    analyze_schema_node(
+                        tool_name,
+                        kind,
+                        before_schema,
+                        after_schema,
+                        String::new(),
+                        0,
+                        &mut nodes,
+                        &mut schema_explanations,
+                        &mut truncated,
+                    );
+                }
+                (None, Some(_)) => push_unclassified(
+                    tool_name,
+                    kind,
+                    String::new(),
+                    "schema presence changed",
+                    "schema absent",
+                    "schema present (contents withheld)",
+                    Vec::new(),
+                    &mut schema_explanations,
+                    &mut truncated,
+                ),
+                (Some(_), None) => push_unclassified(
+                    tool_name,
+                    kind,
+                    String::new(),
+                    "schema presence changed",
+                    "schema present (contents withheld)",
+                    "schema absent",
+                    Vec::new(),
+                    &mut schema_explanations,
+                    &mut truncated,
+                ),
+                (None, None) => {}
+            }
+            if truncated {
+                break;
+            }
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    schema_explanations.sort_by(|left, right| {
+        left.tool
+            .cmp(&right.tool)
+            .then_with(|| left.schema.prefix().cmp(right.schema.prefix()))
+            .then_with(|| left.pointer.cmp(&right.pointer))
+            .then_with(|| left.rule_id.cmp(&right.rule_id))
+    });
+    ToolSchemaExplanationAnalysis {
+        baseline_catalog_complete: baseline.complete,
+        candidate_catalog_complete: candidate.complete,
+        analysis_status: if truncated {
+            SchemaAnalysisStatus::Truncated
+        } else {
+            SchemaAnalysisStatus::Complete
+        },
+        schema_explanations,
+    }
+}
+
+// Keep the bounded recursive walk's per-frame state explicit; these arguments
+// are the complete local context needed to make traversal order and budgets clear.
+#[allow(clippy::too_many_arguments)]
+fn analyze_schema_node(
+    tool: &str,
+    kind: ToolSchemaKind,
+    before: &Value,
+    after: &Value,
+    pointer: String,
+    depth: usize,
+    nodes: &mut usize,
+    out: &mut Vec<SchemaChangeExplanation>,
+    truncated: &mut bool,
+) {
+    if out.len() >= MAX_SCHEMA_EXPLANATIONS - 1 {
+        push_limit_explanation(
+            tool,
+            kind,
+            pointer,
+            "explanation-count limit reached",
+            out,
+            truncated,
+        );
+        return;
+    }
+    if depth > MAX_SCHEMA_DEPTH {
+        push_limit_explanation(
+            tool,
+            kind,
+            pointer,
+            "schema-depth limit reached",
+            out,
+            truncated,
+        );
+        return;
+    }
+    *nodes += 1;
+    if *nodes > MAX_SCHEMA_NODES {
+        push_limit_explanation(
+            tool,
+            kind,
+            pointer,
+            "schema-node limit reached",
+            out,
+            truncated,
+        );
+        return;
+    }
+    let (Some(before), Some(after)) = (before.as_object(), after.as_object()) else {
+        push_unclassified(
+            tool,
+            kind,
+            pointer,
+            "schema shape is not an object",
+            "schema value (contents withheld)",
+            "schema value (contents withheld)",
+            Vec::new(),
+            out,
+            truncated,
+        );
+        return;
+    };
+
+    // Type names are structural keywords, not payload values.
+    if before.get("type") != after.get("type") {
+        match (
+            parse_type_set(before.get("type")),
+            parse_type_set(after.get("type")),
+        ) {
+            (Some(before_types), Some(after_types)) if before_types != after_types => {
+                let narrowing = type_set_subset(&after_types, &before_types);
+                let widening = type_set_subset(&before_types, &after_types);
+                let (suffix, classification, reason) = match (narrowing, widening) {
+                    (true, false) => (
+                        "narrowed",
+                        SchemaChangeClassification::PotentiallyBreaking,
+                        "The candidate accepts fewer JSON types at this schema path.",
+                    ),
+                    (false, true) => (
+                        "widened",
+                        SchemaChangeClassification::PotentiallyNonBreaking,
+                        "The candidate accepts more JSON types at this schema path.",
+                    ),
+                    _ => (
+                        "changed",
+                        SchemaChangeClassification::Ambiguous,
+                        "The candidate type set changed in a way that is not a simple widening or narrowing.",
+                    ),
+                };
+                push_explanation(
+                    tool,
+                    kind,
+                    child_pointer(&pointer, "type"),
+                    format!("{}.type.{suffix}", kind.prefix()),
+                    classification,
+                    type_summary(&before_types),
+                    type_summary(&after_types),
+                    reason,
+                    None,
+                    out,
+                    truncated,
+                );
+            }
+            (Some(_), Some(_)) => {}
+            _ => push_unclassified(
+                tool,
+                kind,
+                child_pointer(&pointer, "type"),
+                "type keyword has an unsupported shape",
+                safe_presence_summary(before.get("type")),
+                safe_presence_summary(after.get("type")),
+                vec!["type".to_string()],
+                out,
+                truncated,
+            ),
+        }
+    }
+
+    // Required property changes are reported at the property schema pointer,
+    // independent of order in the `required` array.
+    if before.get("required") != after.get("required") {
+        match (
+            parse_required(before.get("required")),
+            parse_required(after.get("required")),
+        ) {
+            (Some(before_required), Some(after_required)) => {
+                for name in after_required.difference(&before_required) {
+                    push_explanation(
+                        tool,
+                        kind,
+                        child_pointer(&child_pointer(&pointer, "properties"), name),
+                        format!("{}.required.added", kind.prefix()),
+                        SchemaChangeClassification::PotentiallyBreaking,
+                        "property is optional".to_string(),
+                        "property is required".to_string(),
+                        if kind == ToolSchemaKind::Input {
+                            "Existing callers may omit a newly required input property."
+                        } else {
+                            "Consumers may rely on the baseline output not requiring this property."
+                        },
+                        None,
+                        out,
+                        truncated,
+                    );
+                }
+                for name in before_required.difference(&after_required) {
+                    push_explanation(
+                        tool,
+                        kind,
+                        child_pointer(&child_pointer(&pointer, "properties"), name),
+                        format!("{}.required.removed", kind.prefix()),
+                        SchemaChangeClassification::PotentiallyNonBreaking,
+                        "property is required".to_string(),
+                        "property is optional".to_string(),
+                        if kind == ToolSchemaKind::Input {
+                            "The candidate no longer requires an input property required by the baseline."
+                        } else {
+                            "The candidate no longer guarantees a property that the baseline output required."
+                        },
+                        None,
+                        out,
+                        truncated,
+                    );
+                }
+            }
+            _ => push_unclassified(
+                tool,
+                kind,
+                child_pointer(&pointer, "required"),
+                "required keyword has an unsupported shape",
+                safe_presence_summary(before.get("required")),
+                safe_presence_summary(after.get("required")),
+                vec!["required".to_string()],
+                out,
+                truncated,
+            ),
+        }
+    }
+
+    // Boolean additionalProperties is the only supported form. A schema-valued
+    // restriction remains explicitly unclassified.
+    if before.get("additionalProperties") != after.get("additionalProperties") {
+        let before_state = parse_additional_properties(before.get("additionalProperties"));
+        let after_state = parse_additional_properties(after.get("additionalProperties"));
+        match (before_state, after_state) {
+            (Some(before_state), Some(after_state)) if before_state == after_state => {}
+            (Some(AdditionalPropertiesState::Constrained), _)
+            | (_, Some(AdditionalPropertiesState::Constrained))
+            | (None, _)
+            | (_, None) => push_unclassified(
+                tool,
+                kind,
+                child_pointer(&pointer, "additionalProperties"),
+                "schema-valued or invalid additionalProperties change",
+                safe_presence_summary(before.get("additionalProperties")),
+                safe_presence_summary(after.get("additionalProperties")),
+                vec!["additionalProperties".to_string()],
+                out,
+                truncated,
+            ),
+            (Some(before_state), Some(after_state)) => {
+                let (suffix, classification, reason) = match (before_state, after_state) {
+                    (AdditionalPropertiesState::Allow, AdditionalPropertiesState::Deny) => (
+                        "closed",
+                        SchemaChangeClassification::PotentiallyBreaking,
+                        "The candidate rejects extra object properties that the baseline allowed.",
+                    ),
+                    (AdditionalPropertiesState::Deny, AdditionalPropertiesState::Allow) => (
+                        "opened",
+                        SchemaChangeClassification::PotentiallyNonBreaking,
+                        "The candidate allows extra object properties that the baseline rejected.",
+                    ),
+                    _ => unreachable!("equal and constrained states handled above"),
+                };
+                push_explanation(
+                    tool,
+                    kind,
+                    child_pointer(&pointer, "additionalProperties"),
+                    format!("{}.additional_properties.{suffix}", kind.prefix()),
+                    classification,
+                    before_state.summary().to_string(),
+                    after_state.summary().to_string(),
+                    reason,
+                    None,
+                    out,
+                    truncated,
+                );
+            }
+        }
+    }
+
+    // Enum members are compared as sets but never serialized.
+    if before.get("enum") != after.get("enum") {
+        match (
+            parse_enum(before.get("enum")),
+            parse_enum(after.get("enum")),
+        ) {
+            (Some(before_enum), Some(after_enum)) if before_enum != after_enum => {
+                let narrowing = enum_subset(&after_enum, &before_enum);
+                let widening = enum_subset(&before_enum, &after_enum);
+                let (suffix, classification, reason) = match (narrowing, widening) {
+                    (true, false) => (
+                        "narrowed",
+                        SchemaChangeClassification::PotentiallyBreaking,
+                        "The candidate permits fewer enum values; the values are withheld.",
+                    ),
+                    (false, true) => (
+                        "widened",
+                        SchemaChangeClassification::PotentiallyNonBreaking,
+                        "The candidate permits more enum values; the values are withheld.",
+                    ),
+                    _ => (
+                        "changed",
+                        SchemaChangeClassification::Ambiguous,
+                        "The enum set changed without a pure widening or narrowing; values are withheld.",
+                    ),
+                };
+                push_explanation(
+                    tool,
+                    kind,
+                    child_pointer(&pointer, "enum"),
+                    format!("{}.enum.{suffix}", kind.prefix()),
+                    classification,
+                    enum_summary(&before_enum),
+                    enum_summary(&after_enum),
+                    reason,
+                    None,
+                    out,
+                    truncated,
+                );
+            }
+            (Some(_), Some(_)) => {}
+            _ => push_unclassified(
+                tool,
+                kind,
+                child_pointer(&pointer, "enum"),
+                "enum keyword has an unsupported shape",
+                safe_presence_summary(before.get("enum")),
+                safe_presence_summary(after.get("enum")),
+                vec!["enum".to_string()],
+                out,
+                truncated,
+            ),
+        }
+    }
+
+    // Recurse through property schemas in sorted key order. An undeclared
+    // property schema means no constraint at that property, not raw data.
+    let before_properties = before.get("properties").and_then(Value::as_object);
+    let after_properties = after.get("properties").and_then(Value::as_object);
+    if (before.contains_key("properties") && before_properties.is_none())
+        || (after.contains_key("properties") && after_properties.is_none())
+    {
+        push_unclassified(
+            tool,
+            kind,
+            child_pointer(&pointer, "properties"),
+            "properties keyword has an unsupported shape",
+            safe_presence_summary(before.get("properties")),
+            safe_presence_summary(after.get("properties")),
+            vec!["properties".to_string()],
+            out,
+            truncated,
+        );
+    } else {
+        let mut names = BTreeSet::new();
+        if let Some(properties) = before_properties {
+            names.extend(properties.keys().cloned());
+        }
+        if let Some(properties) = after_properties {
+            names.extend(properties.keys().cloned());
+        }
+        let unconstrained = Value::Object(serde_json::Map::new());
+        for name in names {
+            let before_child = before_properties
+                .and_then(|properties| properties.get(&name))
+                .unwrap_or(&unconstrained);
+            let after_child = after_properties
+                .and_then(|properties| properties.get(&name))
+                .unwrap_or(&unconstrained);
+            if before_child != after_child {
+                analyze_schema_node(
+                    tool,
+                    kind,
+                    before_child,
+                    after_child,
+                    child_pointer(&child_pointer(&pointer, "properties"), &name),
+                    depth + 1,
+                    nodes,
+                    out,
+                    truncated,
+                );
+            }
+            if *truncated {
+                return;
+            }
+        }
+    }
+
+    // All other changed keywords remain unclassified. Values are not exposed;
+    // even descriptions/defaults/examples can accidentally contain secrets.
+    let known = [
+        "type",
+        "required",
+        "properties",
+        "additionalProperties",
+        "enum",
+    ];
+    let mut keywords = BTreeSet::new();
+    keywords.extend(before.keys().cloned());
+    keywords.extend(after.keys().cloned());
+    for keyword in keywords {
+        if known.contains(&keyword.as_str()) || before.get(&keyword) == after.get(&keyword) {
+            continue;
+        }
+        push_unclassified(
+            tool,
+            kind,
+            child_pointer(&pointer, &keyword),
+            "changed keyword is outside the version-1 analyzer subset",
+            safe_presence_summary(before.get(&keyword)),
+            safe_presence_summary(after.get(&keyword)),
+            vec![keyword],
+            out,
+            truncated,
+        );
+        if *truncated {
+            return;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdditionalPropertiesState {
+    Allow,
+    Deny,
+    Constrained,
+}
+
+impl AdditionalPropertiesState {
+    fn summary(self) -> &'static str {
+        match self {
+            Self::Allow => "additional properties allowed",
+            Self::Deny => "additional properties denied",
+            Self::Constrained => "additional properties constrained (details withheld)",
+        }
+    }
+}
+
+fn parse_additional_properties(value: Option<&Value>) -> Option<AdditionalPropertiesState> {
+    match value {
+        None | Some(Value::Bool(true)) => Some(AdditionalPropertiesState::Allow),
+        Some(Value::Bool(false)) => Some(AdditionalPropertiesState::Deny),
+        Some(Value::Object(_)) => Some(AdditionalPropertiesState::Constrained),
+        Some(_) => None,
+    }
+}
+
+fn parse_type_set(value: Option<&Value>) -> Option<Option<BTreeSet<String>>> {
+    let Some(value) = value else {
+        return Some(None);
+    };
+    let types = match value {
+        Value::String(name) => vec![name.as_str()],
+        Value::Array(values) => {
+            if values.is_empty() || values.len() > 7 {
+                return None;
+            }
+            let types = values
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            let unique = types.iter().copied().collect::<BTreeSet<_>>();
+            if unique.len() != types.len() {
+                return None;
+            }
+            types
+        }
+        _ => return None,
+    };
+    let known = [
+        "null", "boolean", "object", "array", "number", "integer", "string",
+    ];
+    if types.iter().any(|name| !known.contains(name)) {
+        return None;
+    }
+    Some(Some(types.into_iter().map(str::to_owned).collect()))
+}
+
+fn type_set_subset(
+    candidate: &Option<BTreeSet<String>>,
+    baseline: &Option<BTreeSet<String>>,
+) -> bool {
+    let Some(candidate) = candidate else {
+        return baseline.is_none();
+    };
+    let Some(baseline) = baseline else {
+        return true;
+    };
+    candidate.iter().all(|candidate_type| {
+        baseline.contains(candidate_type)
+            || (candidate_type == "integer" && baseline.contains("number"))
+    })
+}
+
+fn type_summary(types: &Option<BTreeSet<String>>) -> String {
+    types.as_ref().map_or_else(
+        || "any JSON type".to_string(),
+        |types| {
+            format!(
+                "type {}",
+                types.iter().cloned().collect::<Vec<_>>().join(" | ")
+            )
+        },
+    )
+}
+
+fn parse_required(value: Option<&Value>) -> Option<BTreeSet<String>> {
+    match value {
+        None => Some(BTreeSet::new()),
+        Some(Value::Array(values)) if values.len() <= MAX_SCHEMA_NODES => {
+            let names = values
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            let unique = names.iter().copied().collect::<BTreeSet<_>>();
+            if unique.len() != names.len() {
+                return None;
+            }
+            Some(unique.into_iter().map(str::to_owned).collect())
+        }
+        _ => None,
+    }
+}
+
+fn parse_enum(value: Option<&Value>) -> Option<Option<BTreeSet<String>>> {
+    match value {
+        None => Some(None),
+        Some(Value::Array(values)) if !values.is_empty() && values.len() <= MAX_SCHEMA_NODES => {
+            let serialized = values.iter().map(Value::to_string).collect::<Vec<_>>();
+            let unique = serialized.iter().cloned().collect::<BTreeSet<_>>();
+            if unique.len() != serialized.len() {
+                return None;
+            }
+            Some(Some(unique))
+        }
+        _ => None,
+    }
+}
+
+fn enum_subset(candidate: &Option<BTreeSet<String>>, baseline: &Option<BTreeSet<String>>) -> bool {
+    match (candidate, baseline) {
+        (Some(candidate), Some(baseline)) => candidate.is_subset(baseline),
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => true,
+    }
+}
+
+fn enum_summary(values: &Option<BTreeSet<String>>) -> String {
+    values.as_ref().map_or_else(
+        || "unrestricted enum (all values)".to_string(),
+        |values| format!("enum set ({} values; members withheld)", values.len()),
+    )
+}
+
+fn safe_presence_summary(value: Option<&Value>) -> String {
+    if value.is_some() {
+        "present (contents withheld)".to_string()
+    } else {
+        "absent".to_string()
+    }
+}
+
+fn child_pointer(parent: &str, token: &str) -> String {
+    let escaped = token.replace('~', "~0").replace('/', "~1");
+    format!("{parent}/{escaped}")
+}
+
+fn output_classification(
+    kind: ToolSchemaKind,
+    classification: SchemaChangeClassification,
+) -> SchemaChangeClassification {
+    if kind == ToolSchemaKind::Output && classification != SchemaChangeClassification::Unclassified
+    {
+        SchemaChangeClassification::Ambiguous
+    } else {
+        classification
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_explanation(
+    tool: &str,
+    kind: ToolSchemaKind,
+    pointer: String,
+    rule_id: String,
+    classification: SchemaChangeClassification,
+    before_summary: String,
+    after_summary: String,
+    reason: &str,
+    unsupported_keywords: Option<Vec<String>>,
+    out: &mut Vec<SchemaChangeExplanation>,
+    truncated: &mut bool,
+) {
+    if out.len() >= MAX_SCHEMA_EXPLANATIONS {
+        push_limit_explanation(
+            tool,
+            kind,
+            pointer,
+            "explanation-count limit reached",
+            out,
+            truncated,
+        );
+        return;
+    }
+    out.push(SchemaChangeExplanation {
+        tool: tool.to_string(),
+        schema: kind,
+        pointer,
+        rule_id,
+        classification: output_classification(kind, classification),
+        before_summary,
+        after_summary,
+        reason: reason.to_string(),
+        unsupported_keywords,
+    });
+}
+
+// This helper forwards the full redacted finding context to the shared sink.
+#[allow(clippy::too_many_arguments)]
+fn push_unclassified(
+    tool: &str,
+    kind: ToolSchemaKind,
+    pointer: String,
+    reason: &str,
+    before_summary: impl Into<String>,
+    after_summary: impl Into<String>,
+    unsupported_keywords: Vec<String>,
+    out: &mut Vec<SchemaChangeExplanation>,
+    truncated: &mut bool,
+) {
+    push_explanation(
+        tool,
+        kind,
+        pointer,
+        format!("{}.unclassified", kind.prefix()),
+        SchemaChangeClassification::Unclassified,
+        before_summary.into(),
+        after_summary.into(),
+        reason,
+        if unsupported_keywords.is_empty() {
+            None
+        } else {
+            Some(unsupported_keywords)
+        },
+        out,
+        truncated,
+    );
+}
+
+fn push_limit_explanation(
+    tool: &str,
+    kind: ToolSchemaKind,
+    pointer: String,
+    reason: &str,
+    out: &mut Vec<SchemaChangeExplanation>,
+    truncated: &mut bool,
+) {
+    *truncated = true;
+    if out.len() < MAX_SCHEMA_EXPLANATIONS {
+        out.push(SchemaChangeExplanation {
+            tool: tool.to_string(),
+            schema: kind,
+            pointer,
+            rule_id: format!("{}.analysis_limit", kind.prefix()),
+            classification: SchemaChangeClassification::Unclassified,
+            before_summary: "analysis stopped at configured work limit".to_string(),
+            after_summary: "analysis stopped at configured work limit".to_string(),
+            reason: reason.to_string(),
+            unsupported_keywords: None,
+        });
+    }
+}
 fn diff_tools(
     a_tools: &BTreeMap<String, ToolDef>,
     b_tools: &BTreeMap<String, ToolDef>,
@@ -1435,6 +2236,72 @@ mod tests {
     }
 
     #[test]
+    fn tool_identity_matches_independent_golden_vectors() {
+        #[derive(serde::Deserialize)]
+        struct Vector {
+            name: String,
+            title: Option<String>,
+            description: Option<String>,
+            #[serde(rename = "inputSchema")]
+            input_schema: Option<Value>,
+            #[serde(rename = "outputSchema")]
+            output_schema: Option<Value>,
+            annotations: Option<Value>,
+            canonical: String,
+            sha256: String,
+        }
+
+        let vectors: Vec<Vector> = serde_json::from_str(include_str!(
+            "../../../tests/golden/tool-identity-vectors.json"
+        ))
+        .unwrap();
+        for vector in vectors {
+            let def = ToolDef {
+                title: vector.title,
+                description: vector.description,
+                input_schema: vector.input_schema,
+                output_schema: vector.output_schema,
+                annotations: vector.annotations,
+            };
+            assert_eq!(
+                tool_identity_canonical(&vector.name, &def),
+                vector.canonical
+            );
+            assert_eq!(tool_hash(&vector.name, &def), vector.sha256);
+        }
+    }
+
+    #[test]
+    fn tool_identity_ignores_object_key_order_but_detects_contract_mutations() {
+        let a = ToolDef {
+            title: None,
+            description: Some("Find café".to_string()),
+            input_schema: Some(serde_json::from_str(
+                r#"{"type":"object","properties":{"first":{"type":"string"},"second":{"type":"null"}}}"#,
+            ).unwrap()),
+            output_schema: Some(json!({"type":"object", "properties":{"value":{"type":"string"}}})),
+            annotations: Some(json!({"readOnlyHint": true})),
+        };
+        let reordered = ToolDef {
+            input_schema: Some(serde_json::from_str(
+                r#"{"properties":{"second":{"type":"null"},"first":{"type":"string"}},"type":"object"}"#,
+            ).unwrap()),
+            ..a.clone()
+        };
+        assert_eq!(tool_hash("search", &a), tool_hash("search", &reordered));
+
+        let mut changed = a.clone();
+        changed.input_schema.as_mut().unwrap()["properties"]["second"] = Value::Null;
+        assert_ne!(tool_hash("search", &a), tool_hash("search", &changed));
+        changed = a.clone();
+        changed.output_schema.as_mut().unwrap()["properties"]["value"]["type"] = json!("integer");
+        assert_ne!(tool_hash("search", &a), tool_hash("search", &changed));
+        changed = a.clone();
+        changed.annotations.as_mut().unwrap()["readOnlyHint"] = json!(false);
+        assert_ne!(tool_hash("search", &a), tool_hash("search", &changed));
+    }
+
+    #[test]
     fn point_of_divergence_is_none_for_identical_sessions() {
         let a = session("d", "t", 1000);
         let b = session("d", "t", 1000);
@@ -1561,5 +2428,176 @@ mod tests {
         assert_eq!(pod.key, "tools/call echo#0");
         assert_eq!(pod.kind, DivergenceKind::MissingExchange);
         assert!(pod.detail.contains("stopped prematurely"));
+    }
+
+    #[test]
+    fn schema_explanation_matches_labeled_synthetic_corpus() {
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../../tests/golden/t105-schema-diff-corpus.json"
+        ))
+        .unwrap();
+        let cases = corpus["cases"].as_array().unwrap();
+        let mut false_positives = 0usize;
+        let mut false_negatives = 0usize;
+        let mut per_rule = BTreeMap::<String, (usize, usize)>::new();
+
+        for case in cases {
+            let mut before = session("d", "t", 1000);
+            let mut after = session("d", "t", 1000);
+            let schema_name = case["schema"].as_str().unwrap();
+            for (messages, side) in [(&mut before, "before"), (&mut after, "after")] {
+                let mut tool = json!({"name":"echo", "description":"d"});
+                tool[if schema_name == "input" {
+                    "inputSchema"
+                } else {
+                    "outputSchema"
+                }] = case[side].clone();
+                messages[3] = msg(
+                    3,
+                    30,
+                    "s2c",
+                    "response",
+                    Some("2"),
+                    None,
+                    None,
+                    json!({"jsonrpc":"2.0","id":2,"result":{"tools":[tool]}}),
+                    false,
+                );
+            }
+            let analysis = explain_tool_schema_changes(&before, &after);
+            assert_eq!(
+                analysis.analysis_status,
+                SchemaAnalysisStatus::Complete,
+                "case {}",
+                case["id"]
+            );
+            let expected = case["expect"].as_array().unwrap();
+            if analysis.schema_explanations.len() > expected.len() {
+                false_positives += analysis.schema_explanations.len() - expected.len();
+            }
+            if analysis.schema_explanations.len() < expected.len() {
+                false_negatives += expected.len() - analysis.schema_explanations.len();
+            }
+            assert_eq!(
+                analysis.schema_explanations.len(),
+                expected.len(),
+                "case {}",
+                case["id"]
+            );
+            for (observed, expected) in analysis.schema_explanations.iter().zip(expected) {
+                let observed = serde_json::to_value(observed).unwrap();
+                for field in [
+                    "pointer",
+                    "rule_id",
+                    "classification",
+                    "before_summary",
+                    "after_summary",
+                    "unsupported_keywords",
+                ] {
+                    if let Some(expected_value) = expected.get(field) {
+                        assert_eq!(
+                            observed[field], *expected_value,
+                            "case {} field {field}",
+                            case["id"]
+                        );
+                    }
+                }
+                let rule = observed["rule_id"].as_str().unwrap().to_string();
+                per_rule.entry(rule).or_default().0 += 1;
+            }
+            let serialized = serde_json::to_string(&analysis).unwrap();
+            for secret in [
+                "SECRET_ALPHA",
+                "SECRET_BETA",
+                "DO_NOT_LEAK_SCHEMA_SECRET",
+                "https://example.invalid/secret",
+            ] {
+                assert!(
+                    !serialized.contains(secret),
+                    "case {} leaked {secret}",
+                    case["id"]
+                );
+            }
+        }
+        println!("T-105 synthetic corpus: {} fixtures, {false_positives} false positives, {false_negatives} false negatives; observed rules: {per_rule:?}", cases.len());
+        assert_eq!(false_positives, 0);
+        assert_eq!(false_negatives, 0);
+    }
+
+    #[test]
+    fn schema_explanation_reports_incomplete_catalog_and_traversal_limits() {
+        let before = session("d", "t", 1000);
+        let mut incomplete = session("d", "t", 1000);
+        let mut list_response: Value = serde_json::from_str(&incomplete[3].payload).unwrap();
+        list_response["result"]["nextCursor"] = json!("cursor-never-recorded");
+        incomplete[3].payload = list_response.to_string();
+        let analysis = explain_tool_schema_changes(&before, &incomplete);
+        assert_eq!(
+            analysis.analysis_status,
+            SchemaAnalysisStatus::IncompleteCatalog
+        );
+        assert!(analysis.schema_explanations.is_empty());
+
+        let mut baseline_schema = json!({"type":"object","properties":{}});
+        let mut candidate_schema = json!({"type":"object","properties":{}});
+        for index in 0..110 {
+            baseline_schema["properties"][format!("p{index:03}")] = json!({"type":"string"});
+            candidate_schema["properties"][format!("p{index:03}")] = json!({"type":"number"});
+        }
+        let mut a = session("d", "t", 1000);
+        let mut b = session("d", "t", 1000);
+        for (messages, schema) in [(&mut a, baseline_schema), (&mut b, candidate_schema)] {
+            messages[3] = msg(
+                3,
+                30,
+                "s2c",
+                "response",
+                Some("2"),
+                None,
+                None,
+                json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","inputSchema":schema}]}}),
+                false,
+            );
+        }
+        let analysis = explain_tool_schema_changes(&a, &b);
+        assert_eq!(analysis.analysis_status, SchemaAnalysisStatus::Truncated);
+        assert_eq!(analysis.schema_explanations.len(), MAX_SCHEMA_EXPLANATIONS);
+        assert_eq!(
+            analysis.schema_explanations.last().unwrap().rule_id,
+            "input.analysis_limit"
+        );
+        assert_eq!(
+            analysis.schema_explanations.last().unwrap().classification,
+            SchemaChangeClassification::Unclassified
+        );
+    }
+
+    #[test]
+    fn descriptions_and_annotations_keep_existing_security_findings() {
+        let a = session("Never allow 10 records", "t", 1000);
+        let b = session("Allow 100 records", "t", 1000);
+        let report = diff_sessions(&a, &b, &DiffOptions::default());
+        assert!(report
+            .security
+            .iter()
+            .any(|finding| finding.kind == SecurityFindingKind::ToolDescriptionChanged));
+        let explanation = explain_tool_schema_changes(&a, &b);
+        assert!(explanation.schema_explanations.is_empty());
+
+        let mut annotated = session("Never allow 10 records", "t", 1000);
+        let mut changed_annotation = session("Never allow 10 records", "t", 1000);
+        let mut response: Value = serde_json::from_str(&changed_annotation[3].payload).unwrap();
+        response["result"]["tools"][0]["annotations"] =
+            json!({"destructiveHint":true,"title":"annotation secret"});
+        changed_annotation[3].payload = response.to_string();
+        let report = diff_sessions(&annotated, &changed_annotation, &DiffOptions::default());
+        assert!(report
+            .security
+            .iter()
+            .any(|finding| finding.kind == SecurityFindingKind::ToolAnnotationsChanged));
+        assert!(explain_tool_schema_changes(&annotated, &changed_annotation)
+            .schema_explanations
+            .is_empty());
+        annotated[3].payload = changed_annotation[3].payload.clone();
     }
 }

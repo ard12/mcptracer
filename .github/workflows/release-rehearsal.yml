@@ -1,6 +1,6 @@
 name: Release rehearsal
 
-# Manual-only proof that the release pipeline works, run before a tag exists.
+# Non-publishing proof that the release pipeline works before a tag exists.
 #
 # This workflow deliberately never triggers on `push`/`tags` and never runs
 # the publish step: no GitHub Release, no release-asset upload, no push of
@@ -28,6 +28,8 @@ name: Release rehearsal
 # layout, the checksum method, or the SBOM action/config in release.yml's
 # `build` or `release` jobs, mirror the change here too.
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -42,6 +44,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: mcptracer
+  REHEARSAL_VERSION: ${{ inputs.version || 'source-candidate' }}
 
 # Deliberately minimal: no contents:write (nothing is ever pushed or
 # published), no id-token/attestations (see the note on SBOM generation in
@@ -58,12 +61,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
           # Native ARM64 runner (not cross-compilation) so the binary can
           # actually be executed below. Same reasoning as release.yml.
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
           # Intel runner on purpose - see release.yml's build matrix for why
@@ -114,12 +117,20 @@ jobs:
           fi
           "$bin" --version
 
+      - name: Check Linux glibc symbol floor
+        if: contains(matrix.target, 'linux-gnu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}"
+          python scripts/check_glibc_compat.py "$bin" --max-glibc 2.35
+
       - name: Package (unix)
         if: matrix.archive_ext == 'tar.gz'
         shell: bash
         run: |
           set -euo pipefail
-          staging="${{ env.BIN_NAME }}-${{ inputs.version }}-${{ matrix.target }}"
+          staging="${{ env.BIN_NAME }}-${{ env.REHEARSAL_VERSION }}-${{ matrix.target }}"
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}" "$staging/"
           cp README.md LICENSE NOTICE COMMERCIAL-LICENSE.md CHANGELOG.md "$staging/"
@@ -133,7 +144,7 @@ jobs:
         if: matrix.archive_ext == 'zip'
         shell: pwsh
         run: |
-          $staging = "${{ env.BIN_NAME }}-${{ inputs.version }}-${{ matrix.target }}"
+          $staging = "${{ env.BIN_NAME }}-${{ env.REHEARSAL_VERSION }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}.exe" $staging
           Copy-Item README.md,LICENSE,NOTICE,COMMERCIAL-LICENSE.md,CHANGELOG.md $staging
@@ -197,6 +208,13 @@ jobs:
           fi
           "$bin" --version
           echo "BIN_PATH=$bin" >> "$GITHUB_ENV"
+
+      - name: Check packaged Linux glibc requirements
+        if: contains(matrix.target, 'linux-gnu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_glibc_compat.py "${{ env.EXTRACTED }}/${{ env.BIN_NAME }}" --max-glibc 2.35
 
       - name: Verify archive contains required files
         shell: bash
@@ -305,7 +323,7 @@ jobs:
         with:
           path: .
           format: cyclonedx-json
-          output-file: dist/${{ env.BIN_NAME }}-${{ inputs.version }}.cdx.json
+          output-file: dist/${{ env.BIN_NAME }}-${{ env.REHEARSAL_VERSION }}.cdx.json
 
       # This is a workflow artifact (build log/debug output), not a GitHub
       # Release asset - it is not attached to any release and nothing is
@@ -320,4 +338,4 @@ jobs:
 
       - name: Rehearsal passed
         run: |
-          echo "Release rehearsal for ${{ inputs.version }} passed - build, package, checksum, SBOM, and end-to-end scenario all succeeded for every advertised target."
+          echo "Release rehearsal for ${{ env.REHEARSAL_VERSION }} passed - build, package, checksum, SBOM, and end-to-end scenario all succeeded for every advertised target."

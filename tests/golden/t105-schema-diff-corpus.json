@@ -1,0 +1,497 @@
+{
+  "corpus_version": 1,
+  "scope": "synthetic labeled rule corpus; not real-world accuracy evidence",
+  "cases": [
+    {
+      "id": "required_added",
+      "schema": "input",
+      "before": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "after": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ]
+      },
+      "expect": [
+        {
+          "pointer": "/properties/token",
+          "rule_id": "input.required.added",
+          "classification": "potentially_breaking",
+          "before_summary": "property is optional",
+          "after_summary": "property is required"
+        }
+      ]
+    },
+    {
+      "id": "required_removed",
+      "schema": "input",
+      "before": {
+        "type": "object",
+        "required": [
+          "token"
+        ]
+      },
+      "after": {
+        "type": "object"
+      },
+      "expect": [
+        {
+          "pointer": "/properties/token",
+          "rule_id": "input.required.removed",
+          "classification": "potentially_non_breaking"
+        }
+      ]
+    },
+    {
+      "id": "type_narrowed",
+      "schema": "input",
+      "before": {
+        "type": "number"
+      },
+      "after": {
+        "type": "integer"
+      },
+      "expect": [
+        {
+          "pointer": "/type",
+          "rule_id": "input.type.narrowed",
+          "classification": "potentially_breaking"
+        }
+      ]
+    },
+    {
+      "id": "type_widened",
+      "schema": "input",
+      "before": {
+        "type": "integer"
+      },
+      "after": {
+        "type": "number"
+      },
+      "expect": [
+        {
+          "pointer": "/type",
+          "rule_id": "input.type.widened",
+          "classification": "potentially_non_breaking"
+        }
+      ]
+    },
+    {
+      "id": "type_incomparable",
+      "schema": "input",
+      "before": {
+        "type": "string"
+      },
+      "after": {
+        "type": "integer"
+      },
+      "expect": [
+        {
+          "pointer": "/type",
+          "rule_id": "input.type.changed",
+          "classification": "ambiguous"
+        }
+      ]
+    },
+    {
+      "id": "enum_narrowed",
+      "schema": "input",
+      "before": {
+        "enum": [
+          "SECRET_ALPHA",
+          "beta",
+          "gamma"
+        ]
+      },
+      "after": {
+        "enum": [
+          "SECRET_ALPHA",
+          "beta"
+        ]
+      },
+      "expect": [
+        {
+          "pointer": "/enum",
+          "rule_id": "input.enum.narrowed",
+          "classification": "potentially_breaking",
+          "before_summary": "enum set (3 values; members withheld)"
+        }
+      ]
+    },
+    {
+      "id": "enum_widened",
+      "schema": "input",
+      "before": {
+        "enum": [
+          "alpha"
+        ]
+      },
+      "after": {
+        "enum": [
+          "alpha",
+          "SECRET_BETA"
+        ]
+      },
+      "expect": [
+        {
+          "pointer": "/enum",
+          "rule_id": "input.enum.widened",
+          "classification": "potentially_non_breaking"
+        }
+      ]
+    },
+    {
+      "id": "enum_overlap",
+      "schema": "input",
+      "before": {
+        "enum": [
+          "alpha",
+          "beta"
+        ]
+      },
+      "after": {
+        "enum": [
+          "beta",
+          "gamma"
+        ]
+      },
+      "expect": [
+        {
+          "pointer": "/enum",
+          "rule_id": "input.enum.changed",
+          "classification": "ambiguous"
+        }
+      ]
+    },
+    {
+      "id": "additional_properties_closed",
+      "schema": "input",
+      "before": {
+        "additionalProperties": true
+      },
+      "after": {
+        "additionalProperties": false
+      },
+      "expect": [
+        {
+          "pointer": "/additionalProperties",
+          "rule_id": "input.additional_properties.closed",
+          "classification": "potentially_breaking"
+        }
+      ]
+    },
+    {
+      "id": "additional_properties_opened",
+      "schema": "input",
+      "before": {
+        "additionalProperties": false
+      },
+      "after": {
+        "additionalProperties": true
+      },
+      "expect": [
+        {
+          "pointer": "/additionalProperties",
+          "rule_id": "input.additional_properties.opened",
+          "classification": "potentially_non_breaking"
+        }
+      ]
+    },
+    {
+      "id": "output_required_added",
+      "schema": "output",
+      "before": {
+        "type": "object"
+      },
+      "after": {
+        "type": "object",
+        "required": [
+          "result"
+        ]
+      },
+      "expect": [
+        {
+          "pointer": "/properties/result",
+          "rule_id": "output.required.added",
+          "classification": "ambiguous"
+        }
+      ]
+    },
+    {
+      "id": "output_type_narrowed",
+      "schema": "output",
+      "before": {
+        "type": "number"
+      },
+      "after": {
+        "type": "integer"
+      },
+      "expect": [
+        {
+          "pointer": "/type",
+          "rule_id": "output.type.narrowed",
+          "classification": "ambiguous"
+        }
+      ]
+    },
+    {
+      "id": "output_enum_widened",
+      "schema": "output",
+      "before": {
+        "enum": [
+          "red"
+        ]
+      },
+      "after": {
+        "enum": [
+          "red",
+          "blue"
+        ]
+      },
+      "expect": [
+        {
+          "pointer": "/enum",
+          "rule_id": "output.enum.widened",
+          "classification": "ambiguous"
+        }
+      ]
+    },
+    {
+      "id": "output_additional_properties_closed",
+      "schema": "output",
+      "before": {
+        "additionalProperties": true
+      },
+      "after": {
+        "additionalProperties": false
+      },
+      "expect": [
+        {
+          "pointer": "/additionalProperties",
+          "rule_id": "output.additional_properties.closed",
+          "classification": "ambiguous"
+        }
+      ]
+    },
+    {
+      "id": "nested_escaped_property",
+      "schema": "input",
+      "before": {
+        "properties": {
+          "outer": {
+            "properties": {
+              "x/y~": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "after": {
+        "properties": {
+          "outer": {
+            "properties": {
+              "x/y~": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "expect": [
+        {
+          "pointer": "/properties/outer/properties/x~1y~0/type",
+          "rule_id": "input.type.changed",
+          "classification": "ambiguous"
+        }
+      ]
+    },
+    {
+      "id": "description_rewording",
+      "schema": "input",
+      "before": {
+        "description": "Accepts a request."
+      },
+      "after": {
+        "description": "Accepts the request."
+      },
+      "expect": [
+        {
+          "pointer": "/description",
+          "rule_id": "input.unclassified",
+          "classification": "unclassified"
+        }
+      ]
+    },
+    {
+      "id": "description_negation_and_number",
+      "schema": "input",
+      "before": {
+        "description": "Never return more than 10 records."
+      },
+      "after": {
+        "description": "Return more than 100 records."
+      },
+      "expect": [
+        {
+          "pointer": "/description",
+          "rule_id": "input.unclassified",
+          "classification": "unclassified"
+        }
+      ]
+    },
+    {
+      "id": "unsupported_ref",
+      "schema": "input",
+      "before": {
+        "$ref": "#/definitions/private"
+      },
+      "after": {
+        "$ref": "https://example.invalid/secret"
+      },
+      "expect": [
+        {
+          "pointer": "/$ref",
+          "rule_id": "input.unclassified",
+          "classification": "unclassified",
+          "unsupported_keywords": [
+            "$ref"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "schema_valued_additional_properties",
+      "schema": "input",
+      "before": {
+        "additionalProperties": true
+      },
+      "after": {
+        "additionalProperties": {
+          "type": "string",
+          "description": "DO_NOT_LEAK_SCHEMA_SECRET"
+        }
+      },
+      "expect": [
+        {
+          "pointer": "/additionalProperties",
+          "rule_id": "input.unclassified",
+          "classification": "unclassified"
+        }
+      ]
+    },
+    {
+      "id": "equivalent_enum_order",
+      "schema": "input",
+      "before": {
+        "enum": [
+          "a",
+          "b"
+        ]
+      },
+      "after": {
+        "enum": [
+          "b",
+          "a"
+        ]
+      },
+      "expect": []
+    },
+    {
+      "id": "invalid_empty_type_array",
+      "schema": "input",
+      "before": {
+        "type": "string"
+      },
+      "after": {
+        "type": []
+      },
+      "expect": [
+        {
+          "pointer": "/type",
+          "rule_id": "input.unclassified",
+          "classification": "unclassified",
+          "unsupported_keywords": [
+            "type"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "invalid_duplicate_required",
+      "schema": "input",
+      "before": {
+        "required": [
+          "alpha"
+        ]
+      },
+      "after": {
+        "required": [
+          "alpha",
+          "alpha"
+        ]
+      },
+      "expect": [
+        {
+          "pointer": "/required",
+          "rule_id": "input.unclassified",
+          "classification": "unclassified",
+          "unsupported_keywords": [
+            "required"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "invalid_empty_enum",
+      "schema": "input",
+      "before": {
+        "enum": [
+          "private-value"
+        ]
+      },
+      "after": {
+        "enum": []
+      },
+      "expect": [
+        {
+          "pointer": "/enum",
+          "rule_id": "input.unclassified",
+          "classification": "unclassified",
+          "unsupported_keywords": [
+            "enum"
+          ]
+        }
+      ]
+    }
+  ],
+  "out_of_classifier_scope": [
+    {
+      "id": "risky_annotation_change",
+      "finding": "tool_annotations_changed",
+      "compatibility_classification": null
+    },
+    {
+      "id": "description_rewording",
+      "finding": "tool_description_changed",
+      "compatibility_classification": null
+    },
+    {
+      "id": "description_negation_and_number",
+      "finding": "tool_description_changed",
+      "compatibility_classification": null
+    }
+  ]
+}

@@ -129,3 +129,9 @@ Pure unit tests over hand-built `SessionModel`/payload pairs:
 - latency within threshold → not reported; beyond threshold → reported.
 - added/removed tool → reflected in `tools_added`/`tools_removed`.
 - status flip `Ok -> Error` → `StatusChanged` + error-rate change.
+
+## Tool-schema explanations (T-105)
+
+The bounded, opt-in report contract is specified in
+[`schema-change-explanations.md`](schema-change-explanations.md). The default
+`DiffReport` and its v3 JSON schema remain unchanged.

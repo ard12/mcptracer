@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ard12/mcptracer/schemas/schema-explanation-report.v1.schema.json",
+  "title": "MCPTracer opt-in tool schema explanation report (v1)",
+  "description": "Advisory output from diff --explain-schema --json. The nested diff_report is validated separately against diff-report.v4.schema.json; this schema freezes the explanation envelope and findings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "diff_schema_version",
+    "baseline_catalog_complete",
+    "candidate_catalog_complete",
+    "analysis_status",
+    "diff_report",
+    "schema_explanations"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "diff_schema_version": {
+      "type": "integer",
+      "const": 4
+    },
+    "baseline_catalog_complete": {
+      "type": "boolean"
+    },
+    "candidate_catalog_complete": {
+      "type": "boolean"
+    },
+    "analysis_status": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "incomplete_catalog",
+        "truncated"
+      ]
+    },
+    "diff_report": {
+      "type": "object",
+      "required": [
+        "schema_version"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "const": 4
+        }
+      }
+    },
+    "schema_explanations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/explanation"
+      }
+    }
+  },
+  "$defs": {
+    "explanation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "schema",
+        "pointer",
+        "rule_id",
+        "classification",
+        "before_summary",
+        "after_summary",
+        "reason"
+      ],
+      "properties": {
+        "tool": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string",
+          "enum": [
+            "input",
+            "output"
+          ]
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "rule_id": {
+          "type": "string"
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "potentially_breaking",
+            "potentially_non_breaking",
+            "ambiguous",
+            "unclassified"
+          ]
+        },
+        "before_summary": {
+          "type": "string"
+        },
+        "after_summary": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "unsupported_keywords": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

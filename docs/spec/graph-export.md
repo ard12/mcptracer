@@ -1,6 +1,6 @@
 # Spec: Temporal Tool Memory Graph Export (`mcptracer graph`)
 
-Status: **shipped, v1 scope.** Built entirely on the derived index
+Status: **shipped, v1 scope; Labs, opt-in build (`--features labs`).** Built entirely on the derived index
 (`mcptracer index rebuild`) added for
 [the derived-index architecture](../architecture/overview.md#derived-local-analysis). Read-only:
 `graph` never mutates recorded sessions or the derived index.

@@ -67,4 +67,5 @@ mcptracer semantic "rug pull" --allow-unredacted --limit 20
 
 Requires building with `--features semantic-search`
 (`cargo build -p mcptracer-proxy --features semantic-search`); the command
-does not exist in a default build.
+does not exist in a default build. That feature also enables `labs`, since
+`semantic` searches the derived index the Labs commands build.

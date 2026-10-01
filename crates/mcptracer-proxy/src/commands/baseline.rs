@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use clap::{Args, Subcommand};
 use mcptracer_storage::{mtrace, Baseline, Store};
 
+use crate::session_health::require_complete_capture;
 use crate::session_writer::now_ns;
 
 #[derive(Args)]
@@ -127,6 +128,7 @@ pub async fn run(args: BaselineArgs, db_path: PathBuf) -> Result<()> {
                 allow_unredacted,
             };
             let document = store.export_mtrace_document(&session_id, options)?;
+            require_complete_capture(&store, &session_id, "baseline promotion")?;
             let digest = mtrace::canonical_digest(&document);
 
             store.promote_baseline(

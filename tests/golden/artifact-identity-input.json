@@ -1,0 +1,40 @@
+{
+  "format": "mtrace",
+  "version": 1,
+  "session": {
+    "client": "test",
+    "server_command": "server",
+    "transport": "stdio",
+    "started_at_ns": 0,
+    "ended_at_ns": 1,
+    "redaction_policy": "default",
+    "redaction_keys": [],
+    "dropped_messages": 0,
+    "tags": [
+      "fixture"
+    ]
+  },
+  "messages": [
+    {
+      "seq": 0,
+      "ts_ns": 0,
+      "direction": "c2s",
+      "message_kind": "request",
+      "rpc_id": "1",
+      "method": "tools/call",
+      "tool_name": "echo",
+      "payload": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "echo",
+          "api_key": "***REDACTED***"
+        }
+      },
+      "payload_bytes": 64,
+      "is_error": false,
+      "error_code": null
+    }
+  ]
+}

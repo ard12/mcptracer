@@ -33,9 +33,9 @@ Decision record for the four open questions:
 3. **Id scoping:** correlation keys on **`(direction-of-responder, rpc_id)`**,
    never `rpc_id` alone. MCP is bidirectional; ids are per-originator. See
    "Why direction matters."
-4. **Orphan policy:** orphans are represented **explicitly** as `Exchange`s with
-   status `Unanswered` (request with no response) or as `OrphanResponse` (a
-   response with no matching prior request). Never silently dropped.
+4. **Orphan policy:** unmatched requests are represented as `Unanswered`, a
+   matched `notifications/cancelled` request is `Cancelled`, and responses
+   without a prior request are `OrphanResponse`. None are silently dropped.
 
 ## Background: the shape of stored data
 
@@ -93,6 +93,9 @@ pub enum ExchangeStatus {
     Error,
     /// A `subscriptions/listen` request acknowledged by its long-lived stream.
     Subscribed,
+    /// Request explicitly cancelled by its originator with
+    /// `notifications/cancelled`; no response is expected.
+    Cancelled,
     /// Request had no matching response in the session (pending at end,
     /// server crash, or a dropped record).
     Unanswered,
@@ -150,6 +153,7 @@ pub struct SessionStats {
     pub ok: usize,
     pub errors: usize,
     pub unanswered: usize,
+    pub cancelled: usize,
     pub orphan_responses: usize,
     pub notifications: usize,
     pub latency_p50_ns: Option<i64>,
@@ -207,14 +211,18 @@ for msg in messages (in seq order):
               }
 
       "notification":
+          if method == "notifications/cancelled":
+              request_id = payload.params.requestId
+              if request_id identifies a pending request from this direction:
+                  remove it from pending and set status to Cancelled
           if dir == ServerToClient and method == "notifications/subscriptions/acknowledged":
               subscription_id = payload.params._meta["io.modelcontextprotocol/subscriptionId"]
               if subscription_id identifies a pending c2s subscriptions/listen request:
                   set that exchange's status to Subscribed (keep it pending for a later terminal response)
           push NotificationEvent { seq, ts_ns, dir, method (default "" if missing) }
 
-# Anything left in `pending` is already recorded as Unanswered, except an
-# acknowledged `subscriptions/listen` exchange, which is Subscribed.
+# Anything left in `pending` is Unanswered, except acknowledged subscriptions
+# (Subscribed) and requests matched by notifications/cancelled (Cancelled).
 # Sort exchanges by (request_seq or response_seq) ascending for stable output.
 # Compute SessionStats.
 ```
@@ -248,26 +256,29 @@ answered exchanges. Keep this deterministic — tests assert exact values.
    request; the `c2s` response pairs the `s2c` request).
 4. **Error response** — response with `is_error=true` → status `Error`,
    `error_code` populated.
-5. **Unanswered request** — request with no response (e.g. session ends
+5. **Unanswered request** — request with no response or cancellation (e.g. session ends
    mid-flight) → status `Unanswered`, `latency_ns = None`.
-6. **Orphan response** — response with no prior request (simulate a dropped
+6. **Cancelled request** — request followed by a same-origin
+   `notifications/cancelled` with matching `params.requestId` → status
+   `Cancelled`; remove it from pending and do not treat it as capture loss.
+7. **Orphan response** — response with no prior request (simulate a dropped
    request record) → one `OrphanResponse` exchange.
-7. **Notification** — `notifications/initialized` (no id) → one
+8. **Notification** — `notifications/initialized` (no id) → one
    `NotificationEvent`, zero exchanges.
-8. **Acknowledged subscription** — a c2s `subscriptions/listen` request followed
+9. **Acknowledged subscription** — a c2s `subscriptions/listen` request followed
    by s2c `notifications/subscriptions/acknowledged` carrying the same
    subscription id → one `Subscribed` exchange plus one `NotificationEvent`,
    without requiring a terminal response.
-9. **Id reuse after completion** — `c2s req id=1`, `s2c resp id=1`, later
+10. **Id reuse after completion** — `c2s req id=1`, `s2c resp id=1`, later
    `c2s req id=1` again, `s2c resp id=1` → two separate `Ok` exchanges (the map
    key is free again after the first pair completes).
-10. **Duplicate in-flight id (same direction)** — `c2s req id=1`, `c2s req id=1`
+11. **Duplicate in-flight id (same direction)** — `c2s req id=1`, `c2s req id=1`
    (no response between) → the second overwrites the pending entry; first stays
    `Unanswered`; a later `s2c resp id=1` pairs the second. Document as a
    best-effort rule for malformed streams.
-10. **Empty session** — no messages → empty model, all stats zero, percentiles
+12. **Empty session** — no messages → empty model, all stats zero, percentiles
     `None`.
-11. **String vs. integer ids** — `id: "list-1"` (stored `"\"list-1\""`) and
+13. **String vs. integer ids** — `id: "list-1"` (stored `"\"list-1\""`) and
     `id: 1` (stored `"1"`) never collide because their stored strings differ.
 
 ## Performance

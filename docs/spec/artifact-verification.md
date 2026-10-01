@@ -42,6 +42,42 @@ one just decoded from an on-disk `.mtrace` file — they agree exactly for the
 same content, which is what makes cross-machine, cross-time verification
 possible at all.
 
+## Identity vector contract (T-104)
+
+The independently reviewed synthetic vectors live in `tests/golden/` and are
+checked by both Rust unit tests and `tests/test_identity_vectors.py`. The Python
+harness constructs sorted, compact UTF-8 JSON with Python's standard library
+and hashes those bytes with `hashlib.sha256`; it does not call MCPTracer or the
+Rust CLI. These fixtures are contract evidence, not customer recordings.
+
+Artifact v1 hashes exactly the identity projection above. The typed `session`
+and each typed message are serialized with every declared field; optional
+values serialize as `null`, and fields with serde defaults are materialized on
+import before identity is recomputed. The artifact fixture pins those bytes and
+SHA-256. Export time and exporter name remain excluded. Reordered object keys
+compare equal, while array/message order, truncation, payload edits, and
+session edits change the digest. Import and re-export preserve identity.
+
+Tool pinning is a separate SHA-256 identity over exactly `name`, `title`,
+`description`, `inputSchema`, `outputSchema`, and `annotations`. All six keys
+are emitted; absent optional Rust fields serialize as `null`. Within schema or
+annotation JSON, an omitted object member differs from an explicit `null`,
+object key order is ignored, and array order is retained. The vectors exercise
+output schemas and annotations as identity-bearing fields.
+
+Both contracts use `serde_json::Value`'s compact serialization with sorted
+object keys, not RFC 8785 JCS. The reference fixtures cover Unicode keys and
+values, escaped quotes/backslashes/newlines, nested arrays, null and omitted
+members, the signed 64-bit and unsigned 64-bit integer limits, and the portable
+finite decimal `0.5`. Floating point exponent spellings and values outside
+serde_json's supported integer range are not cross-language identity inputs in
+this contract; broadening that domain requires a versioned migration proposal
+and old-reader compatibility evidence. Artifact parsing rejects invalid JSON
+numeric constants such as `NaN`/`Infinity`; tool hashing accepts an already
+constructed `serde_json::Value` and performs no coercion. These rules preserve
+all existing recorded digests; digest matches establish content integrity only
+and do not authenticate a publisher or make an artifact tamper-evident.
+
 ## Evidence manifest (`mcptracer_model::manifest::EvidenceManifest`)
 
 ```jsonc
@@ -208,3 +244,13 @@ follow-up, not a silently dropped requirement.
   "signature: verified" for it, plus each structural-validation failure
   above — all before `verify` ever reads the `--artifact` file, which in
   this test does not even exist.
+
+### Atomic artifact file writes
+
+`.mtrace` exports and assertion manifests are written to a private temporary
+sibling, flushed, then published with a same-directory hard link that fails if
+the destination already exists. A failed write removes its temporary file and
+leaves no partial destination; an existing artifact is never replaced. If the
+filesystem cannot publish by hard link, export fails without changing the
+existing destination. This is a local-file atomicity guarantee, not a durability
+claim across sudden power loss on every filesystem.

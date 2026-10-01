@@ -23,11 +23,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import uuid
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +44,18 @@ HTTP_REPLAY_SESSION_ID_RE = re.compile(r"HTTP-replaying session \S+ as (\S+) ->"
 
 def mcptracer_bin() -> str:
     return os.environ.get("MCPTRACER_BIN", "mcptracer")
+
+
+def server_command(cell: dict) -> list[str]:
+    """Resolve an optional isolated Python interpreter without shell parsing."""
+    command = list(cell["command"])
+    variable = cell.get("command_env_var")
+    if variable:
+        executable = os.environ.get(variable)
+        if not executable:
+            raise RuntimeError(f"matrix cell {cell['id']} requires environment variable {variable}")
+        command[0] = executable
+    return command
 
 
 @dataclass
@@ -85,20 +100,102 @@ def extract_session_id(stderr: bytes, pattern: re.Pattern = RECORD_SESSION_ID_RE
     return match.group(1) if match else None
 
 
-def record_session(db: Path, server_dir: Path, command: list[str], client: str,
-                    extra_env: dict[str, str] | None = None) -> tuple[str | None, str]:
-    with open(CLIENT_SCRIPT, "rb") as f:
-        client_bytes = f.read()
-    full_command = [*command]
-    proc = subprocess.run(
-        [mcptracer_bin(), "--db", str(db), "record", "--client", client, "--", *full_command],
-        input=client_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=server_dir,
-        env={**os.environ, **(extra_env or {})},
-        timeout=30,
+def record_interactive(db: Path, server_dir: Path, command: list[str], client: str,
+                        extra_env: dict[str, str] | None, timeout: float,
+                        client_script: Path | None = None
+                        ) -> subprocess.CompletedProcess:
+    """Drive `record` like a real MCP client: send the script, keep stdin open
+    until every request has its response, then close it. The default path
+    hands over the whole script and hits EOF at once, which is not how a
+    client behaves and which some SDKs answer by cancelling in-flight requests
+    (see matrix.toml's `interactive_client` note). Waiting on responses, not a
+    sleep, keeps this deterministic however slow the runner or the server's
+    startup is."""
+    lines = (client_script or CLIENT_SCRIPT).read_bytes().splitlines(keepends=True)
+    expected = 0
+    for line in lines:
+        if line.strip():
+            message = json.loads(line)
+            if "method" in message and "id" in message:
+                expected += 1
+
+    proc = subprocess.Popen(
+        [mcptracer_bin(), "--db", str(db), "record", "--client", client, "--", *command],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=server_dir, env={**os.environ, **(extra_env or {})},
     )
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    responses = threading.Semaphore(0)
+
+    def read_stdout() -> None:
+        for raw in proc.stdout:
+            stdout_chunks.append(raw)
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                continue
+            if "result" in message or "error" in message:
+                responses.release()
+
+    def read_stderr() -> None:
+        for raw in proc.stderr:
+            stderr_chunks.append(raw)
+
+    readers = [threading.Thread(target=read_stdout, daemon=True),
+               threading.Thread(target=read_stderr, daemon=True)]
+    for thread in readers:
+        thread.start()
+
+    deadline = time.monotonic() + timeout
+    try:
+        try:
+            for line in lines:
+                proc.stdin.write(line)
+                proc.stdin.flush()
+        except OSError:
+            # The server exited before reading the whole script; validate
+            # reports whatever was left unanswered.
+            pass
+        else:
+            for _ in range(expected):
+                if not responses.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                    break
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=max(1.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    for thread in readers:
+        thread.join(timeout=5)
+    return subprocess.CompletedProcess(
+        proc.args, proc.returncode, b"".join(stdout_chunks), b"".join(stderr_chunks))
+
+
+def record_session(db: Path, server_dir: Path, command: list[str], client: str,
+                    extra_env: dict[str, str] | None = None,
+                    interactive: bool = False,
+                    client_script: Path | None = None) -> tuple[str | None, str]:
+    if interactive:
+        proc = record_interactive(db, server_dir, command, client, extra_env,
+                                  timeout=30, client_script=client_script)
+    else:
+        with open(client_script or CLIENT_SCRIPT, "rb") as f:
+            client_bytes = f.read()
+        proc = subprocess.run(
+            [mcptracer_bin(), "--db", str(db), "record", "--client", client, "--", *command],
+            input=client_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=server_dir,
+            env={**os.environ, **(extra_env or {})},
+            timeout=30,
+        )
     stderr_text = proc.stderr.decode("utf-8", errors="replace")
     if proc.returncode != 0:
         return None, f"record exited {proc.returncode}: {stderr_text}"
@@ -112,12 +209,16 @@ def run_stdio_cell(cell: dict, workdir: Path) -> CellResult:
     cell_id = cell["id"]
     result = CellResult(cell_id=cell_id, required=cell.get("required", True))
     server_dir = COMPAT_ROOT / cell["server_dir"]
-    command = cell["command"]
+    command = server_command(cell)
     rugpull_env = cell.get("rugpull_env", "MCPTRACER_COMPAT_RUGPULL")
     db = workdir / "compat.db"
 
     # Step 1: record the trusted baseline.
-    baseline_id, detail = record_session(db, server_dir, command, cell_id)
+    interactive = bool(cell.get("interactive_client", False))
+    client_script = COMPAT_ROOT / cell.get("client_script", "client_scripts/baseline.jsonl")
+    baseline_id, detail = record_session(db, server_dir, command, cell_id,
+                                          interactive=interactive,
+                                          client_script=client_script)
     if not result.record("record baseline", baseline_id is not None, detail):
         return result
 
@@ -176,7 +277,9 @@ def run_stdio_cell(cell: dict, workdir: Path) -> CellResult:
     # first time -- a silent contract change must be caught even though the
     # call/response text on the wire never changes.
     candidate_id, detail = record_session(db, server_dir, command, cell_id,
-                                           extra_env={rugpull_env: "1"})
+                                           extra_env={rugpull_env: "1"},
+                                           interactive=interactive,
+                                           client_script=client_script)
     if result.record("record rug-pulled candidate", candidate_id is not None, detail):
         proc = run_cli(db, "diff", baseline_id, candidate_id, "--ignore-latency")
         result.record("diff baseline vs rug-pulled candidate (expect exit 1)",
@@ -209,9 +312,12 @@ def wait_for_port(host: str, port: int, proc: subprocess.Popen | None = None,
     return False
 
 
-def stop_process(proc: subprocess.Popen) -> None:
+def stop_process(proc: subprocess.Popen, graceful: bool = False) -> None:
     if proc.poll() is None:
-        proc.terminate()
+        if graceful and os.name == "nt":
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -259,36 +365,54 @@ def parse_http_body(content_type: str, body: bytes) -> list[dict]:
     return [json.loads(body.decode("utf-8", errors="replace"))]
 
 
-def drive_http_client_script(proxy_port: int, client_name: str) -> str | None:
-    """POSTs client_scripts/baseline.jsonl's messages through the proxy at
-    `proxy_port`, threading the server-assigned Mcp-Session-Id from the
-    first response into every subsequent request the way a real Streamable
-    HTTP client must, then sends a terminating DELETE -- the MCP Streamable
-    HTTP transport's own session-termination mechanism, and the only way
-    record-http finalizes ("closes") the logical session immediately rather
-    than leaving it open. Without this, `mcptracer validate` reports
-    SessionNotClosed even though every message was captured correctly:
-    killing the record-http process instead does not flush ended_at_ns.
-    Returns the session id, or None if one was never assigned (a
-    stateless-mode server)."""
+def drive_http_client_script(
+    proxy_port: int, client_name: str, client_script: Path = CLIENT_SCRIPT,
+    group_header: str | None = None, group_value: str | None = None,
+) -> str | None:
+    """Drive a real HTTP script, handling both sessionful and stateless eras.
+
+    Legacy calls carry the server-assigned session id. Modern calls derive the
+    required version/method/name routing headers from their self-describing
+    request envelope and share only the explicit synthetic trace boundary.
+    """
     session_id: str | None = None
-    with open(CLIENT_SCRIPT, encoding="utf-8") as f:
+    with open(client_script, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             message = json.loads(line)
+            params = message.get("params", {})
+            metadata = params.get("_meta", message.get("_meta", {}))
+            version = metadata.get("io.modelcontextprotocol/protocolVersion")
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
-                "MCP-Protocol-Version": "2025-06-18",
-                "Mcp-Name": client_name,
             }
+            if version:
+                headers["MCP-Protocol-Version"] = version
+                headers["Mcp-Method"] = message["method"]
+                if message["method"] in ("tools/call", "prompts/get"):
+                    name = params.get("name")
+                    if name is not None:
+                        headers["Mcp-Name"] = name
+                elif message["method"] == "resources/read":
+                    uri = params.get("uri")
+                    if uri is not None:
+                        headers["Mcp-Name"] = uri
+            else:
+                headers["Mcp-Name"] = client_name
+            if group_header and group_value:
+                headers[group_header] = group_value
             if session_id:
                 headers["Mcp-Session-Id"] = session_id
             status, response_headers, body = http_post(proxy_port, "/mcp", message, headers)
             if status not in (200, 202):
                 raise RuntimeError(f"HTTP {status} posting {message.get('method')}: {body!r}")
+            if "id" in message:
+                replies = parse_http_body(response_headers.get("content-type", ""), body)
+                if not any(reply.get("id") == message["id"] for reply in replies):
+                    raise RuntimeError(f"HTTP {status} omitted response id {message['id']!r} for {message.get('method')}")
             if "mcp-session-id" in response_headers:
                 session_id = response_headers["mcp-session-id"]
     if session_id:
@@ -304,9 +428,12 @@ def session_has_method(db: Path, session_id: str, method: str) -> bool:
     return any(m.get("method") == method for m in messages)
 
 
-def latest_recorded_session(db: Path) -> tuple[str | None, str]:
-    """The session(s) record-http just wrote, as ONE session id ready for
-    validate/assert/export/replay.
+def latest_recorded_session(db: Path, stateless_grouped: bool = False) -> tuple[str | None, str]:
+    """Select the capture the record-http run just wrote.
+
+    Legacy handshakes may split initialize into a provisional session and
+    require a merge. A uniquely grouped modern stateless run is one session
+    without initialize and is selected by its server/discover request.
 
     T-70's logical-session partitioning (deliberate, documented in
     docs/spec/transport-http.md) means a client that sends `initialize`
@@ -330,6 +457,11 @@ def latest_recorded_session(db: Path) -> tuple[str | None, str]:
         return sessions[0]["id"], ""
 
     newer, older = sessions[0]["id"], sessions[1]["id"]
+    if stateless_grouped and session_has_method(db, newer, "server/discover"):
+        # Current-protocol cells use a unique trace header for each capture;
+        # unlike legacy HTTP there is no initialize-only provisional session
+        # to merge. The newest modern group is the run just recorded.
+        return newer, ""
     newer_has_init = session_has_method(db, newer, "initialize")
     older_has_init = session_has_method(db, older, "initialize")
     if older_has_init and not newer_has_init:
@@ -357,7 +489,7 @@ def run_http_cell(cell: dict, workdir: Path) -> CellResult:
     cell_id = cell["id"]
     result = CellResult(cell_id=cell_id, required=cell.get("required", True))
     server_dir = COMPAT_ROOT / cell["server_dir"]
-    command = cell["command"]
+    command = server_command(cell)
     rugpull_env = cell.get("rugpull_env", "MCPTRACER_COMPAT_RUGPULL")
     pin_path = server_dir / "pin.toml"
     db = workdir / "compat.db"
@@ -375,27 +507,39 @@ def run_http_cell(cell: dict, workdir: Path) -> CellResult:
             if not wait_for_port("127.0.0.1", upstream_port, upstream):
                 stderr = upstream.stderr.read().decode("utf-8", "replace") if upstream.stderr else ""
                 return None, f"upstream server never opened port {upstream_port}: {stderr}"
+            group_header = cell.get("group_stateless_by_header")
+            group_value = f"{cell_id}-{uuid.uuid4()}" if group_header else None
+            proxy_args = [mcptracer_bin(), "--db", str(db), "record-http",
+                          "--listen", f"127.0.0.1:{proxy_port}",
+                          "--target", f"http://127.0.0.1:{upstream_port}",
+                          "--client", cell_id]
+            if group_header:
+                proxy_args.extend(["--group-stateless-by-header", group_header])
             proxy = subprocess.Popen(
-                [mcptracer_bin(), "--db", str(db), "record-http",
-                 "--listen", f"127.0.0.1:{proxy_port}",
-                 "--target", f"http://127.0.0.1:{upstream_port}",
-                 "--client", cell_id],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                proxy_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
             )
             if not wait_for_port("127.0.0.1", proxy_port, proxy):
                 stderr = proxy.stderr.read().decode("utf-8", "replace") if proxy.stderr else ""
                 return None, f"record-http never opened port {proxy_port}: {stderr}"
             try:
-                drive_http_client_script(proxy_port, cell_id)
+                client_script = COMPAT_ROOT / cell.get("client_script", "client_scripts/baseline.jsonl")
+                drive_http_client_script(
+                    proxy_port, cell_id, client_script,
+                    group_header=group_header, group_value=group_value,
+                )
                 time.sleep(0.2)
             except Exception as exc:  # noqa: BLE001 -- surfaced as a step failure, not a crash
                 return None, f"driving client script failed: {exc}"
         finally:
             if proxy is not None:
-                stop_process(proxy)
+                # Stateless groups close through the proxy's actual graceful
+                # shutdown path. A transport DELETE has no JSON-RPC request id
+                # and some modern servers answer it with an orphan error.
+                stop_process(proxy, graceful=bool(group_header))
             stop_process(upstream)
 
-        return latest_recorded_session(db)
+        return latest_recorded_session(db, stateless_grouped=bool(group_header))
 
     # Step 1: record the trusted baseline.
     baseline_id, detail = record_via_http()
@@ -404,7 +548,27 @@ def run_http_cell(cell: dict, workdir: Path) -> CellResult:
 
     # Step 2: validate capture integrity.
     proc = run_cli(db, "validate", baseline_id)
-    if not result.record("validate", proc.returncode == 0, proc.stderr.decode("utf-8", "replace")):
+    validation_detail = (
+        proc.stdout.decode("utf-8", "replace") + proc.stderr.decode("utf-8", "replace")
+    )
+    if proc.returncode != 0:
+        messages = run_cli(db, "sessions", "show", baseline_id, "--json")
+        try:
+            entries = json.loads(messages.stdout.decode("utf-8", "replace") or "[]")
+            summary = [
+                {
+                    "seq": entry.get("seq"),
+                    "direction": entry.get("direction"),
+                    "kind": entry.get("message_kind"),
+                    "method": entry.get("method"),
+                    "rpc_id": entry.get("payload", {}).get("id"),
+                }
+                for entry in entries
+            ]
+            validation_detail += json.dumps(summary, indent=2)
+        except (json.JSONDecodeError, AttributeError):
+            validation_detail += messages.stdout.decode("utf-8", "replace")
+    if not result.record("validate", proc.returncode == 0, validation_detail):
         return result
 
     # Step 3: assert --spec pin.toml PASS.
@@ -495,7 +659,7 @@ def print_report(results: list[CellResult]) -> bool:
             mark = "ok  " if step.ok else "FAIL"
             print(f"  [{mark}] {step.name}")
             if not step.ok and step.detail:
-                for line in step.detail.strip().splitlines()[:10]:
+                for line in step.detail.strip().splitlines()[:80]:
                     print(f"        {line}")
         if not result.passed and result.required:
             all_ok = False

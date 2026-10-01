@@ -1,0 +1,9 @@
+# Trusted tool contract for the real Go SDK server, pinned from a session
+# recorded against the unmodified server (MCPTRACER_COMPAT_RUGPULL unset).
+# Same bootstrap procedure as the other cells: run `assert --spec` with an
+# empty hashes table once against a trusted recording and copy the printed
+# hash in. The hash covers the schema the SDK infers from the Go input struct,
+# so it moves with the pinned go-sdk / jsonschema-go versions in go.sum.
+[[assert]]
+kind = "tools_pinned"
+hashes = { send_email = "cc2e526f5307a75985813c8895f4453f1079db96d83d48a79946ea2111ddbf76" }

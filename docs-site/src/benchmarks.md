@@ -2,20 +2,22 @@
 
 ## What this measures
 
-`scripts/bench-overhead.py` measures one narrow thing: the round-trip
-latency `mcptracer record` adds on top of talking to an MCP server
-directly, for a single `tools/call echo` request with a tiny fixed
-payload, over stdio, on one machine. It does **not** measure your real MCP
-server's total latency, network-bound MCP servers, concurrent load (that's
-[`mcptracer bench`](spec/bench.md)'s job, against your own server), or any
-other machine's hardware. Re-run it yourself before making a capacity
-decision:
+`scripts/bench-overhead.py` compares direct and proxied synthetic MCP requests
+for tiny stdio, large-payload stdio, and loopback Streamable HTTP. It reports
+repeated latency distributions, throughput, sampled process memory, storage
+sizes, capture completeness, source/binary provenance, a bounded stdio soak,
+and a controlled-delay sensitivity check. These fixtures measure one machine;
+they do not represent production traffic, concurrent load, network-bound
+servers, or production reliability. For a bounded repeatable run:
 
 ```bash
-python scripts/bench-overhead.py --calls 200 --json
+python scripts/bench-overhead.py --calls 50 --large-calls 10 --warmup 5 --repetitions 3 --json
 ```
 
-## Method
+The results and method below preserve an earlier narrow tiny-stdio experiment.
+Use `--output PATH` to retain current raw JSON evidence.
+
+## Earlier method behind the table below
 
 - Target: `tests/fake_mcp_server.py`, the same trivial in-process Python
   echo server the integration test suite uses.
@@ -29,7 +31,7 @@ python scripts/bench-overhead.py --calls 200 --json
 - Reported below: 4 independent runs of 200 calls each, not a single
   cherry-picked run.
 
-## Results
+## Earlier results
 
 Measured on the sandboxed development environment this project was
 hardened in: Windows 10 (MINGW64), Intel x86_64, 12 logical cores — not a
@@ -57,3 +59,26 @@ typically be orders of magnitude larger than this proxy overhead, making
 mcptracer's relative contribution to end-to-end latency small in practice.
 This page will be updated with a real-server measurement once one is
 available to benchmark against without exposing a third party's traffic.
+
+## Reproducible workload runner
+
+The bounded runner now measures direct and proxied tiny stdio, 256 KiB stdio,
+and loopback Streamable HTTP workloads over repeated runs. It emits revision,
+source-state and binary SHA-256 digests; OS, CPU and toolchain; latency
+percentiles, throughput, sampled process memory, SQLite/WAL sizes and capture
+completeness. The old table above is the earlier narrow tiny-stdio study; it is
+not an acceptance threshold for the expanded workloads.
+
+Repeat a bounded baseline with:
+
+```bash
+python scripts/bench-overhead.py --calls 50 --large-calls 10 --warmup 5 --repetitions 3 --json
+```
+
+Use `--output PATH` to retain the JSON evidence. The tool limits calls,
+payload size and repetitions, and stores transient databases in a temporary
+directory. These loopback fixtures do not represent production traffic or
+concurrent load. Memory is sampled and may miss short peaks. The default runner also records a five-second bounded soak and compares a
+controlled 25 ms slower fake-server run with the baseline. These checks show
+that the harness can observe an injected delay; they are not a production
+latency threshold. No performance threshold is enabled by this measurement.

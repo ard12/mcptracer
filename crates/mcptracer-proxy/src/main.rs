@@ -11,17 +11,21 @@ mod commands {
     pub mod diff_batch;
     pub mod eval;
     pub mod export;
+    #[cfg(feature = "labs")]
     pub mod graph;
     pub mod import;
+    #[cfg(feature = "labs")]
     pub mod index;
     pub mod inspect;
     pub mod merge;
+    #[cfg(feature = "labs")]
     pub mod optimize;
     pub mod quota;
     pub mod record;
     pub mod record_http;
     pub mod replay;
     pub mod replay_http;
+    #[cfg(feature = "labs")]
     pub mod route;
     pub mod search;
     #[cfg(feature = "semantic-search")]
@@ -100,15 +104,23 @@ enum Commands {
     /// Offline-verify a `.mtrace` artifact (and, if recorded, a baseline or
     /// assertion spec) against an evidence manifest's recorded digests.
     Verify(commands::verify::VerifyArgs),
-    /// Rebuild or inspect the derived memory index over recorded sessions.
+    /// Rebuild or inspect the derived memory index over recorded sessions
+    /// (Labs; requires the `labs` feature).
+    #[cfg(feature = "labs")]
     Index(commands::index::IndexArgs),
     /// Read-only local web UI over recorded sessions (session list + timeline).
     Inspect(commands::inspect::InspectArgs),
-    /// Recommend next commands for a session from the derived index and stats.
+    /// Recommend next commands for a session from the derived index and stats
+    /// (Labs; requires the `labs` feature).
+    #[cfg(feature = "labs")]
     Route(commands::route::RouteArgs),
-    /// Mine recorded history for latency/assertion/bench suggestions.
+    /// Mine recorded history for latency/assertion/bench suggestions
+    /// (Labs; requires the `labs` feature).
+    #[cfg(feature = "labs")]
     Optimize(commands::optimize::OptimizeArgs),
-    /// Export the temporal tool memory graph as JSONL or DOT.
+    /// Export the temporal tool memory graph as JSONL or DOT
+    /// (Labs; requires the `labs` feature).
+    #[cfg(feature = "labs")]
     Graph(commands::graph::GraphArgs),
     /// Evaluate token-burst and rate-limit survival offline, labeling reported vs estimated counts.
     Quota(commands::quota::QuotaArgs),
@@ -148,12 +160,15 @@ fn main() -> Result<()> {
 }
 
 async fn dispatch(cli: Cli) -> Result<()> {
-    let db_path = cli.db.unwrap_or_else(mcptracer_storage::default_db_path);
+    let Cli { db, command } = cli;
+    let db_path = db
+        .clone()
+        .unwrap_or_else(mcptracer_storage::default_db_path);
 
-    match cli.command {
+    match command {
         Commands::Record(args) => commands::record::run(args, db_path).await,
         Commands::RecordHttp(args) => commands::record_http::run(args, db_path).await,
-        Commands::Setup(args) => commands::setup::run(args).await,
+        Commands::Setup(args) => commands::setup::run(args, db).await,
         Commands::Replay(args) => commands::replay::run(args, db_path).await,
         Commands::ReplayHttp(args) => commands::replay_http::run(args, db_path).await,
         Commands::Serve(args) => commands::serve::run(args, db_path).await,
@@ -171,13 +186,87 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Export(args) => commands::export::run(args, db_path).await,
         Commands::Import(args) => commands::import::run(args, db_path).await,
         Commands::Verify(args) => commands::verify::run(args).await,
+        #[cfg(feature = "labs")]
         Commands::Index(args) => commands::index::run(args, db_path).await,
         Commands::Inspect(args) => commands::inspect::run(args, db_path).await,
+        #[cfg(feature = "labs")]
         Commands::Route(args) => commands::route::run(args, db_path).await,
+        #[cfg(feature = "labs")]
         Commands::Optimize(args) => commands::optimize::run(args, db_path).await,
+        #[cfg(feature = "labs")]
         Commands::Graph(args) => commands::graph::run(args, db_path).await,
         Commands::Quota(args) => commands::quota::run(args, db_path).await,
         #[cfg(feature = "semantic-search")]
         Commands::Semantic(args) => commands::semantic::run(args, db_path).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Cli;
+
+    const LABS_COMMANDS: [&[&str]; 4] = [
+        &["index", "rebuild"],
+        &["route", "some-session"],
+        &["optimize"],
+        &["graph"],
+    ];
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("mcptracer").chain(args.iter().copied()))
+    }
+
+    #[cfg(not(feature = "labs"))]
+    #[test]
+    fn labs_commands_are_absent_from_a_default_build() {
+        for args in LABS_COMMANDS {
+            let error = match parse(args) {
+                Ok(_) => panic!("`{}` must not exist without the `labs` feature", args[0]),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{args:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "labs")]
+    #[test]
+    fn labs_commands_exist_when_the_feature_is_on() {
+        for args in LABS_COMMANDS {
+            parse(args).unwrap_or_else(|error| panic!("`{}` should parse: {error}", args[0]));
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    #[test]
+    fn semantic_command_is_absent_without_its_feature() {
+        let error = match parse(&["semantic", "query"]) {
+            Ok(_) => panic!("semantic is opt-in"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[cfg(feature = "semantic-search")]
+    #[test]
+    fn semantic_command_exists_with_its_feature() {
+        parse(&["semantic", "query"]).expect("semantic is available in the opt-in build");
+    }
+
+    #[test]
+    fn the_core_workflow_is_in_every_build() {
+        for args in [
+            &["record", "--", "server"][..],
+            &["replay", "some-session", "--", "server"],
+            &["diff", "a", "b"],
+            &["assert", "some-session", "--golden", "other"],
+        ] {
+            parse(args).unwrap_or_else(|error| panic!("`{}` should parse: {error}", args[0]));
+        }
     }
 }

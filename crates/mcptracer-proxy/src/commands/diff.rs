@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use mcptracer_model::diff::{diff_sessions, DiffOptions, DiffReport, ExchangeDelta};
+use mcptracer_model::diff::{
+    diff_sessions, explain_tool_schema_changes, DiffOptions, DiffReport, ExchangeDelta,
+};
 use mcptracer_storage::{mtrace, Store};
 
 use crate::ci_formats::{diff_report_to_github_check_run, diff_security_findings_to_sarif};
@@ -16,7 +18,7 @@ const MAX_POINTER_DIFFS_SHOWN: usize = 20;
 /// `DiffReport` itself lives in `mcptracer_model::diff` and has no room for
 /// this field, so it is spliced into the serialized JSON here rather than
 /// added to the struct.
-const DIFF_REPORT_SCHEMA_VERSION: u32 = 3;
+const DIFF_REPORT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Args)]
 pub struct DiffArgs {
@@ -42,6 +44,11 @@ pub struct DiffArgs {
     /// percentage (and the absolute change exceeds 1ms).
     #[arg(long, default_value_t = 20.0)]
     pub latency_threshold_pct: f64,
+
+    /// Add bounded advisory explanations for supported tool input/output schema changes.
+    /// With --json, emit the versioned schema-explanation envelope.
+    #[arg(long)]
+    pub explain_schema: bool,
 
     /// Always exit 0, even when differences are found.
     #[arg(long)]
@@ -97,17 +104,35 @@ pub async fn run(args: DiffArgs, db_path: PathBuf) -> Result<()> {
     let report = diff_sessions(&a.messages, &b.messages, &opts);
 
     if args.json {
-        let mut payload = serde_json::to_value(&report)?;
-        payload
+        let mut diff_payload = serde_json::to_value(&report)?;
+        diff_payload
             .as_object_mut()
             .expect("DiffReport always serializes as a JSON object")
             .insert(
                 "schema_version".to_string(),
                 serde_json::json!(DIFF_REPORT_SCHEMA_VERSION),
             );
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        if args.explain_schema {
+            let analysis = explain_tool_schema_changes(&a.messages, &b.messages);
+            let payload = serde_json::json!({
+                "schema_version": 1,
+                "diff_schema_version": DIFF_REPORT_SCHEMA_VERSION,
+                "baseline_catalog_complete": analysis.baseline_catalog_complete,
+                "candidate_catalog_complete": analysis.candidate_catalog_complete,
+                "analysis_status": analysis.analysis_status,
+                "diff_report": diff_payload,
+                "schema_explanations": analysis.schema_explanations,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&diff_payload)?);
+        }
     } else {
         print_report(&report);
+        if args.explain_schema {
+            let analysis = explain_tool_schema_changes(&a.messages, &b.messages);
+            print_schema_explanations(&analysis);
+        }
     }
 
     if let Some(sarif_path) = &args.sarif {
@@ -132,6 +157,34 @@ pub async fn run(args: DiffArgs, db_path: PathBuf) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn print_schema_explanations(analysis: &mcptracer_model::diff::ToolSchemaExplanationAnalysis) {
+    println!("\nTool schema explanations (advisory; never changes pass/fail):");
+    println!(
+        "Catalog completeness: baseline={}, candidate={}; analysis={:?}",
+        analysis.baseline_catalog_complete,
+        analysis.candidate_catalog_complete,
+        analysis.analysis_status
+    );
+    for explanation in &analysis.schema_explanations {
+        println!(
+            "  {} {:?} {} [{} / {:?}]",
+            explanation.tool,
+            explanation.schema,
+            if explanation.pointer.is_empty() {
+                "/"
+            } else {
+                &explanation.pointer
+            },
+            explanation.rule_id,
+            explanation.classification
+        );
+        println!(
+            "    {} -> {}. {}",
+            explanation.before_summary, explanation.after_summary, explanation.reason
+        );
+    }
 }
 
 fn print_report(report: &DiffReport) {

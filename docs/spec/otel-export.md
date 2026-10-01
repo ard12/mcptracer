@@ -45,7 +45,8 @@ shape — a single JSON object, not NDJSON):
     `mcp.direction` (`client_to_server` | `server_to_client`),
     `error.type` (the JSON-RPC error code, when present).
   - `status.code`: `STATUS_CODE_OK` (1) for a successful exchange,
-    `STATUS_CODE_ERROR` (2) for an error response or an unanswered request.
+    `STATUS_CODE_ERROR` (2) for an error response or an unanswered request; an
+    explicitly cancelled exchange uses `STATUS_CODE_UNSET` (0).
 
 ## Determinism
 

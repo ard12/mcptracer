@@ -1,4 +1,4 @@
-# MCPTracer real-SDK compatibility matrix. One [[cell]] per (SDK, transport)
+# MCPTracer real-SDK compatibility matrix. One [[cell]] per SDK version, protocol era, and transport
 # combination. See tests/compat/README.md for how to run a single cell
 # locally and docs/spec/compatibility-matrix.md for published results.
 #
@@ -62,3 +62,107 @@ server_dir = "servers/py-http"
 command = ["python3", "server.py"]
 rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
 required = true
+
+[[cell]]
+id = "go-stdio"
+sdk = "go"
+sdk_package = "github.com/modelcontextprotocol/go-sdk"
+sdk_version = "1.8.0"
+transport = "stdio"
+server_dir = "servers/go-stdio"
+command = ["go", "run", "."]
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = true
+# Diagnosed 2026-09-21, independent of MCPTracer: on stdin EOF the Go SDK
+# cancels every request still in flight (internal/jsonrpc2/conn.go
+# readIncoming: "with the reader gone we ... likely cannot write a response
+# either"). Feeding the same script straight into the server with no
+# MCPTracer involved, closing stdin after <=5ms returned 0 of 3 responses on
+# 10/10 runs, and closing it after >=20ms returned 3 of 3 on 10/10 runs. That
+# is deliberate SDK behavior, not a race. The harness's default client hands
+# over the whole script and hits EOF immediately, which is not how a real MCP
+# client behaves, so this cell drives `record` interactively: it keeps stdin
+# open until every request has its response (no sleeps). See
+# docs/spec/compatibility-matrix.md.
+interactive_client = true
+
+
+[[cell]]
+id = "go-modern-stdio"
+sdk = "go"
+sdk_package = "github.com/modelcontextprotocol/go-sdk"
+sdk_version = "1.7.0"
+transport = "stdio"
+server_dir = "servers/go-modern-stdio"
+command = ["go", "run", "."]
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = true
+client_script = "client_scripts/2026-07-28.jsonl"
+interactive_client = true
+
+
+[[cell]]
+id = "py-modern-stdio"
+sdk = "python"
+sdk_package = "mcp"
+sdk_version = "2.2.0"
+transport = "stdio"
+server_dir = "servers/py-modern-stdio"
+command = ["python", "server.py"]
+command_env_var = "MCPTRACER_COMPAT_PY_V2"
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = true
+client_script = "client_scripts/2026-07-28-python.jsonl"
+interactive_client = true
+
+
+[[cell]]
+id = "py-modern-http"
+sdk = "python"
+sdk_package = "mcp"
+sdk_version = "2.2.0"
+transport = "http"
+server_dir = "servers/py-modern-http"
+command = ["python", "server.py"]
+command_env_var = "MCPTRACER_COMPAT_PY_V2"
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = true
+client_script = "client_scripts/2026-07-28-python.jsonl"
+group_stateless_by_header = "X-MCPTracer-Compat-Trace"
+
+[[cell]]
+id = "ts-modern-stdio"
+sdk = "typescript"
+sdk_package = "@modelcontextprotocol/server"
+sdk_version = "2.2.0"
+transport = "stdio"
+server_dir = "servers/ts-modern-stdio"
+command = ["node", "server.js"]
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = true
+client_script = "client_scripts/2026-07-28-typescript.jsonl"
+interactive_client = true
+[[cell]]
+id = "go-modern-http"
+sdk = "go"
+sdk_package = "github.com/modelcontextprotocol/go-sdk"
+sdk_version = "1.7.0"
+transport = "http"
+server_dir = "servers/go-modern-http"
+command = ["go", "run", "."]
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = true
+client_script = "client_scripts/2026-07-28-go-http.jsonl"
+group_stateless_by_header = "X-MCPTracer-Compat-Trace"
+[[cell]]
+id = "ts-modern-http"
+sdk = "typescript"
+sdk_package = "@modelcontextprotocol/server"
+sdk_version = "2.2.0"
+transport = "http"
+server_dir = "servers/ts-modern-http"
+command = ["node", "server.js"]
+rugpull_env = "MCPTRACER_COMPAT_RUGPULL"
+required = true
+client_script = "client_scripts/2026-07-28-typescript-http.jsonl"
+group_stateless_by_header = "X-MCPTracer-Compat-Trace"

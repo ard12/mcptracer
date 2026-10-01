@@ -31,8 +31,8 @@ pub async fn run(args: StatsArgs, db_path: PathBuf) -> Result<()> {
 fn print_stats(stats: &SessionStats) {
     println!("exchanges     {}", stats.total_exchanges);
     println!(
-        "  ok {}  errors {}  unanswered {}  orphan {}",
-        stats.ok, stats.errors, stats.unanswered, stats.orphan_responses
+        "  ok {}  errors {}  unanswered {}  cancelled {}  orphan {}",
+        stats.ok, stats.errors, stats.unanswered, stats.cancelled, stats.orphan_responses
     );
     println!("notifications {}", stats.notifications);
 

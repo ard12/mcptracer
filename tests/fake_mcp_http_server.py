@@ -17,6 +17,7 @@ class Handler(BaseHTTPRequestHandler):
     subscription_queues: dict[str, tuple[queue.Queue[dict], dict]] = {}
     subscription_lock = threading.Lock()
     subscription_event_delivery_count = 0
+    extension_requests: list[dict] = []
 
     def log_message(self, _format: str, *_args: object) -> None:
         pass
@@ -30,6 +31,7 @@ class Handler(BaseHTTPRequestHandler):
                 "headers": self.observed_headers,
                 "mrtr_live_retry_used_fresh_id": self.mrtr_live_retry_used_fresh_id,
                 "subscription_event_delivery_count": self.subscription_event_delivery_count,
+                "extension_requests": self.extension_requests,
             }
         )
 
@@ -64,8 +66,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_big_json(request.get("id"))
             return
 
-        if self.path == "/modern":
-            self._send_modern_json(request)
+        modern_paths = {
+            "/modern",
+            "/modern-changed",
+            "/modern-missing-cache",
+            "/modern-reordered",
+        }
+        if self.path in modern_paths:
+            self._send_modern_json(
+                request,
+                changed=self.path == "/modern-changed",
+                missing_cache=self.path == "/modern-missing-cache",
+                reordered=self.path == "/modern-reordered",
+            )
             return
 
         self._send_json(
@@ -76,8 +89,13 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
 
-    def _send_modern_json(self, request: dict) -> None:
+    def _send_modern_json(
+        self, request: dict, *, changed: bool = False, missing_cache: bool = False, reordered: bool = False
+    ) -> None:
         meta = request.get("params", {}).get("_meta", {})
+        extension_request = meta.get("io.example/mcptracer-test")
+        if extension_request is not None:
+            type(self).extension_requests.append(extension_request)
         version = meta.get("io.modelcontextprotocol/protocolVersion")
         method = request.get("method")
         expected_name = None
@@ -110,7 +128,7 @@ class Handler(BaseHTTPRequestHandler):
                 type(self).mrtr_initial_count += 1
                 state = "source-state" if self.mrtr_initial_count == 1 else "live-state"
                 type(self).mrtr_expected_request_state = state
-                self._send_json_without_session(
+                self._send_request_scoped_response(request,
                     {
                         "jsonrpc": "2.0",
                         "id": request.get("id"),
@@ -139,7 +157,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.mrtr_expected_request_state == "live-state" and request.get("id") != "mrtr-2":
                 type(self).mrtr_live_retry_used_fresh_id = True
-            self._send_json_without_session(
+            self._send_request_scoped_response(request,
                 {
                     "jsonrpc": "2.0",
                     "id": request.get("id"),
@@ -148,30 +166,42 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if method == "tools/list":
-            self._send_json_without_session(
-                {
-                    "jsonrpc": "2.0",
-                    "id": request.get("id"),
-                    "result": {
-                        "resultType": "complete",
-                        "tools": [
-                            {
-                                "name": "echo",
-                                "inputSchema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "text": {"type": "string", "x-mcp-header": "Text"}
-                                    },
+            payload = {
+                "jsonrpc": "2.0",
+                "id": request.get("id"),
+                "result": {
+                    "resultType": "complete",
+                    "ttlMs": 60000 if changed else 30000,
+                    "cacheScope": "private",
+                    "extensions": {
+                        "io.example/mcptracer-test": {
+                            "revision": "fixture-v1",
+                            "flags": ["preserve", "compare"],
+                        }
+                    },
+                    "tools": [
+                        {
+                            "name": "echo",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {"type": "string", "x-mcp-header": "Text"}
                                 },
                             },
-                            {
-                                "name": "mrtr-echo",
-                                "inputSchema": {"type": "object", "properties": {}},
-                            }
-                        ],
-                    },
-                }
-            )
+                        },
+                        {
+                            "name": "mrtr-echo",
+                            "inputSchema": {"type": "object", "properties": {}},
+                        }
+                    ],
+                },
+            }
+            if reordered:
+                payload["result"]["tools"].reverse()
+            if missing_cache:
+                payload["result"].pop("ttlMs")
+                payload["result"].pop("cacheScope")
+            self._send_json_without_session(payload)
             return
 
         if method == "tools/call" and expected_name == "echo":
@@ -267,6 +297,35 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.wfile.flush()
 
+    def _send_request_scoped_response(self, request: dict, payload: dict) -> None:
+        token = request.get("params", {}).get("_meta", {}).get("progressToken")
+        if token is None:
+            self._send_json_without_session(payload)
+            return
+        progress = 1 if "inputResponses" not in request.get("params", {}) else 2
+        self._send_modern_sse(
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {"progressToken": token, "progress": progress, "total": 2},
+                },
+                payload,
+            ]
+        )
+
+    def _send_modern_sse(self, payloads: list[dict]) -> None:
+        body = b"".join(
+            b"data: " + json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n\n"
+            for payload in payloads
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
     def _send_json_without_session(self, payload: dict) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(200)

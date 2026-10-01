@@ -252,11 +252,12 @@ fn print_calls_table(session_id: &str, model: &SessionModel) {
     let stats = &model.stats;
     println!("{}", "-".repeat(90));
     println!(
-        "{} exchanges: {} ok, {} error, {} unanswered, {} orphan; {} notifications",
+        "{} exchanges: {} ok, {} error, {} unanswered, {} cancelled, {} orphan; {} notifications",
         stats.total_exchanges,
         stats.ok,
         stats.errors,
         stats.unanswered,
+        stats.cancelled,
         stats.orphan_responses,
         stats.notifications
     );
@@ -286,6 +287,7 @@ fn status_cell(status: ExchangeStatus) -> &'static str {
         ExchangeStatus::ToolError => "TOOL_ERROR",
         ExchangeStatus::Subscribed => "SUBSCRIBED",
         ExchangeStatus::Unanswered => "UNANSWERED",
+        ExchangeStatus::Cancelled => "CANCELLED",
         ExchangeStatus::OrphanResponse => "ORPHAN",
     }
 }

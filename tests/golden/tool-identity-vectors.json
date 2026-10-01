@@ -1,0 +1,77 @@
+[
+  {
+    "name": "café",
+    "title": null,
+    "description": "quote: \" slash: \\ line\nbreak ☃",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ключ": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "present": {
+                "type": "null"
+              },
+              "empty": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "limits": {
+          "enum": [
+            -9223372036854775808,
+            9223372036854775807,
+            18446744073709551615,
+            0.5
+          ]
+        }
+      },
+      "required": [
+        "ключ",
+        "limits"
+      ]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "résumé": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "x",
+              "雪"
+            ]
+          }
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "nested": [
+        {
+          "x": null
+        },
+        [
+          1,
+          2
+        ]
+      ]
+    },
+    "canonical": "{\"annotations\":{\"nested\":[{\"x\":null},[1,2]],\"openWorldHint\":true,\"readOnlyHint\":false},\"description\":\"quote: \\\" slash: \\\\ line\\nbreak ☃\",\"inputSchema\":{\"properties\":{\"limits\":{\"enum\":[-9223372036854775808,9223372036854775807,18446744073709551615,0.5]},\"ключ\":{\"items\":{\"properties\":{\"empty\":{\"type\":\"string\"},\"present\":{\"type\":\"null\"}},\"type\":\"object\"},\"type\":\"array\"}},\"required\":[\"ключ\",\"limits\"],\"type\":\"object\"},\"name\":\"café\",\"outputSchema\":{\"properties\":{\"résumé\":{\"items\":{\"enum\":[\"x\",\"雪\"]},\"type\":\"array\"}},\"type\":\"object\"},\"title\":null}",
+    "sha256": "6adf42f615dc05c34739c335a4f15fbdf9cda4b23442e4ce8a84749f41241be3"
+  },
+  {
+    "name": "minimal",
+    "title": null,
+    "description": null,
+    "inputSchema": null,
+    "outputSchema": null,
+    "annotations": null,
+    "canonical": "{\"annotations\":null,\"description\":null,\"inputSchema\":null,\"name\":\"minimal\",\"outputSchema\":null,\"title\":null}",
+    "sha256": "e934c7f5401199f8c455ac2a4a26cab1ed0caee903171922628fad8da63749d3"
+  }
+]

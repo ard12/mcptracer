@@ -35,7 +35,7 @@ group_title() {
         compare) echo "Compare -- find what changed between two sessions" ;;
         gate) echo "Gate -- pass/fail checks a CI pipeline can act on" ;;
         share) echo "Share -- export, browse, and inspect recorded evidence" ;;
-        derive) echo "Derive -- mine recorded history for insight (Labs)" ;;
+        derive) echo "Derive -- mine recorded history for insight (Labs, opt-in build)" ;;
         *) return 1 ;;
     esac
 }
@@ -55,9 +55,6 @@ command_group() {
 # command -> extra note appended after its real --help description.
 command_note() {
     case "$1" in
-        index|route|optimize|graph)
-            echo "*(Labs: derived, outside the protocol hot path)*"
-            ;;
         semantic) echo "*(Labs)*" ;;
         *) printf '%s' "" ;;
     esac

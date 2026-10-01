@@ -712,7 +712,10 @@ def test_optimize_mines_history_for_suggestions() -> None:
 
     def mcptracer(*args: str, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["cargo", "run", "--quiet", "--bin", "mcptracer", "--", "--db", str(db_path), *args],
+            [
+                "cargo", "run", "--quiet", "--bin", "mcptracer", "--features", "labs", "--",
+                "--db", str(db_path), *args,
+            ],
             input=input_bytes,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -767,7 +770,10 @@ def test_index_rebuild_surfaces_tool_versions_and_supersession() -> None:
 
     def mcptracer(*args: str, input_bytes: bytes | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["cargo", "run", "--quiet", "--bin", "mcptracer", "--", "--db", str(db_path), *args],
+            [
+                "cargo", "run", "--quiet", "--bin", "mcptracer", "--features", "labs", "--",
+                "--db", str(db_path), *args,
+            ],
             input=input_bytes,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1403,6 +1409,41 @@ def test_baseline_lifecycle_and_ci_resolve_composition() -> None:
     assert resolved_record["promotion_reason"] == "initial baseline"
     assert len(resolved_record["digest"]) == 64
 
+    # Approval is bound to the exact staged (project, scenario, environment,
+    # session) candidate. Staging this changed recording for another scenario
+    # or project must not let an invocation approve it for the trusted CI
+    # baseline; a failed cross-scope attempt must leave the approved baseline
+    # unchanged and the candidate unapproved.
+    scoped_candidate = mcptracer(
+        "baseline", "candidate", project, "preview", environment, changed_id
+    )
+    assert scoped_candidate.returncode == 0, scoped_candidate.stderr.decode(
+        "utf-8", errors="replace"
+    )
+    for other_project, other_scenario in ((project, scenario), ("other-project", scenario)):
+        wrongly_scoped = mcptracer(
+            "baseline", "promote", other_project, other_scenario, environment,
+            changed_id, "--by", "bob", "--reason", "must not cross approval scope",
+            "--allow-unredacted",
+        )
+        assert wrongly_scoped.returncode != 0
+        assert "no candidate baseline" in wrongly_scoped.stderr.decode(
+            "utf-8", errors="replace"
+        )
+    still_approved = mcptracer("baseline", "resolve", project, scenario, environment)
+    assert still_approved.returncode == 0
+    assert still_approved.stdout.decode("utf-8").strip() == session_id
+    scoped_rows = mcptracer("baseline", "list", "--project", project, "--json")
+    assert scoped_rows.returncode == 0
+    scoped_record = next(
+        row for row in json.loads(scoped_rows.stdout)
+        if row["session_id"] == changed_id and row["scenario"] == "preview"
+    )
+    assert scoped_record["state"] == "candidate"
+    assert scoped_record["digest"] is None
+    assert scoped_record["promoted_by"] is None
+    assert scoped_record["promotion_reason"] is None
+
     # The exact CI composition pattern this feature exists for: resolve,
     # then feed the result into assert --golden without ever hardcoding a
     # transient session id.
@@ -1423,14 +1464,34 @@ def test_baseline_lifecycle_and_ci_resolve_composition() -> None:
     )
     assert new_promote.returncode == 0, new_promote.stderr.decode("utf-8", errors="replace")
 
+    now_resolved_json = mcptracer(
+        "baseline", "resolve", project, scenario, environment, "--json"
+    )
+    assert now_resolved_json.returncode == 0
+    now_resolved_record = json.loads(now_resolved_json.stdout)
+    promoted_digest = next(
+        line.split(":", 1)[1].strip()
+        for line in new_promote.stdout.decode("utf-8").splitlines()
+        if line.lstrip().startswith("digest:")
+    )
+    assert now_resolved_record["session_id"] == changed_id
+    assert now_resolved_record["digest"] == promoted_digest
+    assert now_resolved_record["digest"] != resolved_record["digest"]
+    assert now_resolved_record["promoted_by"] == "bob"
+    assert now_resolved_record["promotion_reason"] == "updated baseline"
+
     now_resolved = mcptracer("baseline", "resolve", project, scenario, environment)
     assert now_resolved.stdout.decode("utf-8").strip() == changed_id
 
     listing = mcptracer("baseline", "list", "--project", project, "--json")
     assert listing.returncode == 0, listing.stderr.decode("utf-8", errors="replace")
-    rows = {row["session_id"]: row["state"] for row in json.loads(listing.stdout)}
-    assert rows[session_id] == "superseded"
-    assert rows[changed_id] == "approved"
+    rows = {
+        (row["project"], row["scenario"], row["environment"], row["session_id"]): row
+        for row in json.loads(listing.stdout)
+    }
+    assert rows[(project, scenario, environment, session_id)]["state"] == "superseded"
+    assert rows[(project, scenario, environment, changed_id)]["state"] == "approved"
+    assert rows[(project, "preview", environment, changed_id)]["state"] == "candidate"
 
     revoke = mcptracer(
         "baseline", "revoke", project, scenario, environment, "--reason", "regression found"
@@ -1440,6 +1501,70 @@ def test_baseline_lifecycle_and_ci_resolve_composition() -> None:
     after_revoke = mcptracer("baseline", "resolve", project, scenario, environment)
     assert after_revoke.returncode != 0
     assert "no approved baseline" in after_revoke.stderr.decode("utf-8", errors="replace")
+
+
+def test_baseline_promotion_rejects_incomplete_candidate_without_replacing_approval() -> None:
+    repo = Path(__file__).resolve().parent.parent
+    workdir = make_workdir(repo)
+    db_path = workdir / "sessions.db"
+    fake_server = repo / "tests" / "fake_mcp_server.py"
+    stdin = b"".join(frame(message) for message in SCRIPT)
+
+    def mcptracer(*args: str, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["cargo", "run", "--quiet", "--bin", "mcptracer", "--", "--db", str(db_path), *args],
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=repo,
+            timeout=60,
+            check=False,
+        )
+
+    for client in ("healthy-baseline", "incomplete-candidate"):
+        record = mcptracer(
+            "record", "--client", client, "--", sys.executable, str(fake_server),
+            input_bytes=stdin,
+        )
+        assert record.returncode == 0, record.stderr.decode("utf-8", errors="replace")
+
+    with sqlite3.connect(db_path) as conn:
+        sessions = dict(conn.execute("SELECT client, id FROM sessions"))
+        conn.execute("UPDATE sessions SET dropped_messages=1 WHERE id=?", (sessions["incomplete-candidate"],))
+
+    project, scenario, environment = "approval-test", "smoke", "ci"
+    healthy_id = sessions["healthy-baseline"]
+    incomplete_id = sessions["incomplete-candidate"]
+    assert mcptracer("baseline", "candidate", project, scenario, environment, healthy_id).returncode == 0
+    initial = mcptracer(
+        "baseline", "promote", project, scenario, environment, healthy_id,
+        "--by", "alice", "--reason", "complete capture", "--allow-unredacted",
+    )
+    assert initial.returncode == 0, initial.stderr.decode("utf-8", errors="replace")
+    assert mcptracer("baseline", "candidate", project, scenario, environment, incomplete_id).returncode == 0
+
+    validate = mcptracer("validate", incomplete_id, "--json")
+    assert validate.returncode != 0
+    assert json.loads(validate.stdout)["healthy"] is False
+    rejected = mcptracer(
+        "baseline", "promote", project, scenario, environment, incomplete_id,
+        "--by", "bob", "--reason", "incomplete candidate", "--allow-unredacted",
+    )
+    assert rejected.returncode != 0
+    assert "incomplete capture" in rejected.stderr.decode("utf-8", errors="replace")
+
+    resolved = mcptracer("baseline", "resolve", project, scenario, environment, "--json")
+    assert resolved.returncode == 0
+    assert json.loads(resolved.stdout)["session_id"] == healthy_id
+    listing = mcptracer("baseline", "list", "--project", project, "--json")
+    assert listing.returncode == 0
+    rows = json.loads(listing.stdout)
+    healthy_row = next(row for row in rows if row["session_id"] == healthy_id)
+    incomplete_row = next(row for row in rows if row["session_id"] == incomplete_id)
+    assert healthy_row["state"] == "approved"
+    assert incomplete_row["state"] == "candidate"
+    assert incomplete_row["digest"] is None
+    assert incomplete_row["promoted_by"] is None
 
 
 def test_json_output_conforms_to_published_schemas() -> None:
@@ -1483,10 +1608,19 @@ def test_json_output_conforms_to_published_schemas() -> None:
     )
     assert changed.returncode == 0, changed.stderr.decode("utf-8", errors="replace")
 
+    schema_changed = mcptracer(
+        "record", "--client", "schema-test-schema-changed", "--", sys.executable, str(fake_server),
+        input_bytes=stdin,
+        env={**os.environ, "FAKE_MCP_SCHEMA_VARIANT": "required-added"},
+    )
+    assert schema_changed.returncode == 0, schema_changed.stderr.decode("utf-8", errors="replace")
+
     conn = sqlite3.connect(db_path)
-    ids = [row[0] for row in conn.execute("SELECT id FROM sessions ORDER BY started_at").fetchall()]
+    ids_by_client = dict(conn.execute("SELECT client, id FROM sessions").fetchall())
     conn.close()
-    session_id, changed_id = ids
+    session_id = ids_by_client["schema-test"]
+    changed_id = ids_by_client["schema-test-changed"]
+    schema_changed_id = ids_by_client["schema-test-schema-changed"]
 
     validate_result = mcptracer("validate", session_id, "--json")
     assert validate_result.returncode == 0, validate_result.stderr.decode("utf-8", errors="replace")
@@ -1496,8 +1630,30 @@ def test_json_output_conforms_to_published_schemas() -> None:
 
     diff_result = mcptracer("diff", session_id, changed_id, "--json")
     assert diff_result.returncode in (0, 1), diff_result.stderr.decode("utf-8", errors="replace")
-    diff_schema = schema("diff-report.v3.schema.json")
+    diff_schema = schema("diff-report.v4.schema.json")
     validate_against_schema(json.loads(diff_result.stdout), diff_schema)
+
+    # The default uses the cancellation-capable v4 contract; only the explicit
+    # flag selects the versioned explanation envelope.
+    default_schema_diff = mcptracer("diff", session_id, schema_changed_id, "--json")
+    assert default_schema_diff.returncode == 1
+    default_payload = json.loads(default_schema_diff.stdout)
+    validate_against_schema(default_payload, diff_schema)
+    assert "schema_explanations" not in default_payload
+
+    explanation_diff = mcptracer("diff", session_id, schema_changed_id, "--explain-schema", "--json")
+    assert explanation_diff.returncode == default_schema_diff.returncode
+    explanation_payload = json.loads(explanation_diff.stdout)
+    validate_against_schema(explanation_payload, schema("schema-explanation-report.v1.schema.json"))
+    validate_against_schema(explanation_payload["diff_report"], diff_schema)
+    assert explanation_payload["analysis_status"] == "complete"
+    assert any(
+        item["tool"] == "echo"
+        and item["pointer"] == "/properties/format"
+        and item["rule_id"] == "input.required.added"
+        and item["classification"] == "potentially_breaking"
+        for item in explanation_payload["schema_explanations"]
+    )
 
     spec = workdir / "checks.toml"
     spec.write_text('[[assert]]\nkind = "no_errors"\n', encoding="utf-8")
@@ -3327,6 +3483,12 @@ def test_modern_streamable_http_records_grouped_stateless_calls_and_replays_requ
             },
         }
 
+    def sse_payloads(body: bytes) -> list[dict]:
+        return [
+            json.loads(line[6:])
+            for line in body.splitlines()
+            if line.startswith(b"data: ")
+        ]
     upstream = subprocess.Popen(
         [sys.executable, str(fake_server), str(upstream_port)],
         stdout=subprocess.PIPE,
@@ -3335,6 +3497,56 @@ def test_modern_streamable_http_records_grouped_stateless_calls_and_replays_requ
     )
     proxy = None
     subscription_connection = None
+    phase_ms: dict[str, int] = {}
+    response_statuses: dict[str, int] = {}
+
+    def timed(name: str, action):
+        started = time.monotonic()
+        try:
+            return action()
+        finally:
+            phase_ms[name] = round((time.monotonic() - started) * 1000)
+
+    def session_summary(session_id: str) -> dict[str, object]:
+        validation = mcptracer("validate", session_id, "--json")
+        try:
+            report = json.loads(validation.stdout)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            report = {}
+        try:
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                "SELECT ended_at, total_messages, dropped_messages "
+                "FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            conn.close()
+        except sqlite3.Error:
+            row = None
+        issues = report.get("issues", []) if isinstance(report, dict) else []
+        return {
+            "exists": row is not None,
+            "closed": bool(row and row[0] is not None),
+            "total_messages": row[1] if row else None,
+            "dropped_messages": row[2] if row else None,
+            "validate_exit": validation.returncode,
+            "healthy": report.get("healthy") if isinstance(report, dict) else None,
+            "issue_count": len(issues),
+            "issue_kinds": sorted({item.get("kind", "unknown") for item in issues}),
+        }
+
+    def stream_summary(raw: bytes) -> dict[str, object]:
+        text = raw.decode("utf-8", errors="replace")
+        lowered = text.lower()
+        return {
+            "byte_count": len(raw),
+            "line_count": len(text.splitlines()),
+            "empty": not raw,
+            "sessions_match": "Sessions match" in text,
+            "mentions_unhealthy": "unhealthy" in lowered,
+            "mentions_not_found": "session not found" in lowered,
+        }
+
     try:
         wait_for_port(upstream_port, upstream, timeout=60)
         proxy = subprocess.Popen(
@@ -3358,20 +3570,37 @@ def test_modern_streamable_http_records_grouped_stateless_calls_and_replays_requ
             "X-Mcptracer-Trace": "trace-1",
         }
         discover = modern_request("discover-1", "server/discover")
-        status, response_headers, body = http_post(
-            proxy_port, "/", discover, {**common, "Mcp-Method": "server/discover"}
+        status, response_headers, body = timed(
+            "request_response.discover",
+            lambda: http_post(
+                proxy_port, "/", discover, {**common, "Mcp-Method": "server/discover"}
+            ),
         )
+        response_statuses["discover"] = status
         assert status == 200
         assert "mcp-session-id" not in response_headers
         assert json.loads(body)["result"]["resultType"] == "complete"
 
         listed = modern_request("list-1", "tools/list")
-        status, response_headers, body = http_post(
-            proxy_port, "/", listed, {**common, "Mcp-Method": "tools/list"}
+        extension_request = {"enabled": True, "opaque": ["client", "payload"]}
+        listed["params"]["_meta"]["io.example/mcptracer-test"] = extension_request
+        status, response_headers, body = timed(
+            "request_response.tools_list",
+            lambda: http_post(
+                proxy_port, "/", listed, {**common, "Mcp-Method": "tools/list"}
+            ),
         )
+        response_statuses["tools_list"] = status
         assert status == 200
         assert "mcp-session-id" not in response_headers
-        assert json.loads(body)["result"]["tools"][0]["name"] == "echo"
+        listed_response = json.loads(body)
+        assert listed_response["result"]["tools"][0]["name"] == "echo"
+        assert listed_response["result"]["ttlMs"] == 30000
+        assert listed_response["result"]["cacheScope"] == "private"
+        assert listed_response["result"]["extensions"]["io.example/mcptracer-test"] == {
+            "revision": "fixture-v1",
+            "flags": ["preserve", "compare"],
+        }
 
         listen = modern_request(
             "listen-1", "subscriptions/listen", notifications={"toolsListChanged": True}
@@ -3379,13 +3608,17 @@ def test_modern_streamable_http_records_grouped_stateless_calls_and_replays_requ
         subscription_connection = http.client.HTTPConnection(
             "127.0.0.1", proxy_port, timeout=10
         )
-        subscription_connection.request(
-            "POST",
-            "/",
-            body=json.dumps(listen, separators=(",", ":")).encode("utf-8"),
-            headers={**common, "Mcp-Method": "subscriptions/listen"},
-        )
-        subscription_response = subscription_connection.getresponse()
+        def open_subscription():
+            subscription_connection.request(
+                "POST",
+                "/",
+                body=json.dumps(listen, separators=(",", ":")).encode("utf-8"),
+                headers={**common, "Mcp-Method": "subscriptions/listen"},
+            )
+            return subscription_connection.getresponse()
+
+        subscription_response = timed("request_response.subscription_open", open_subscription)
+        response_statuses["subscription_open"] = subscription_response.status
         assert subscription_response.status == 200
         assert subscription_response.getheader("Content-Type", "").startswith(
             "text/event-stream"
@@ -3403,22 +3636,33 @@ def test_modern_streamable_http_records_grouped_stateless_calls_and_replays_requ
                 return payload
             raise AssertionError("timed out waiting for subscription event")
 
-        acknowledgement = read_subscription_event()
+        acknowledgement = timed("response.subscription_ack", read_subscription_event)
         assert acknowledgement["method"] == "notifications/subscriptions/acknowledged"
         assert acknowledgement["params"]["_meta"][
             "io.modelcontextprotocol/subscriptionId"
         ] == "listen-1"
 
         mrtr_first = modern_request("mrtr-1", "tools/call", name="mrtr-echo", arguments={})
-        status, response_headers, body = http_post(
-            proxy_port,
-            "/",
-            mrtr_first,
-            {**common, "Mcp-Method": "tools/call", "Mcp-Name": "mrtr-echo"},
+        progress_token = "mrtr-progress-token"
+        mrtr_first["params"]["_meta"]["progressToken"] = progress_token
+        status, response_headers, body = timed(
+            "request_response.mrtr_first",
+            lambda: http_post(
+                proxy_port,
+                "/",
+                mrtr_first,
+                {**common, "Mcp-Method": "tools/call", "Mcp-Name": "mrtr-echo"},
+            ),
         )
+        response_statuses["mrtr_first"] = status
         assert status == 200
         assert "mcp-session-id" not in response_headers
-        input_required = json.loads(body)["result"]
+        first_events = sse_payloads(body)
+        assert len(first_events) == 2, first_events
+        assert first_events[0]["method"] == "notifications/progress"
+        assert first_events[0]["params"]["progressToken"] == progress_token
+        assert first_events[0]["params"]["progress"] == 1
+        input_required = first_events[1]["result"]
         assert input_required["resultType"] == "input_required"
 
         mrtr_retry = modern_request(
@@ -3429,67 +3673,134 @@ def test_modern_streamable_http_records_grouped_stateless_calls_and_replays_requ
             inputResponses={"approval": {"action": "accept", "content": {"approved": True}}},
             requestState=input_required["requestState"],
         )
-        status, response_headers, body = http_post(
-            proxy_port,
-            "/",
-            mrtr_retry,
-            {**common, "Mcp-Method": "tools/call", "Mcp-Name": "mrtr-echo"},
+        mrtr_retry["params"]["_meta"]["progressToken"] = progress_token
+        status, response_headers, body = timed(
+            "request_response.mrtr_retry",
+            lambda: http_post(
+                proxy_port,
+                "/",
+                mrtr_retry,
+                {**common, "Mcp-Method": "tools/call", "Mcp-Name": "mrtr-echo"},
+            ),
         )
+        response_statuses["mrtr_retry"] = status
         assert status == 200
         assert "mcp-session-id" not in response_headers
-        assert json.loads(body)["result"]["resultType"] == "complete"
+        retry_events = sse_payloads(body)
+        assert len(retry_events) == 2, retry_events
+        assert retry_events[0]["method"] == "notifications/progress"
+        assert retry_events[0]["params"]["progressToken"] == progress_token
+        assert retry_events[0]["params"]["progress"] == 2
+        assert retry_events[1]["result"]["resultType"] == "complete"
 
         call = modern_request("call-1", "tools/call", name="echo", arguments={"text": "hi"})
-        status, response_headers, body = http_post(
-            proxy_port,
-            "/",
-            call,
-            {**common, "Mcp-Method": "tools/call", "Mcp-Name": "echo", "Mcp-Param-Text": "hi"},
+        status, response_headers, body = timed(
+            "request_response.echo_call",
+            lambda: http_post(
+                proxy_port,
+                "/",
+                call,
+                {**common, "Mcp-Method": "tools/call", "Mcp-Name": "echo", "Mcp-Param-Text": "hi"},
+            ),
         )
+        response_statuses["echo_call"] = status
         assert status == 200
         assert "mcp-session-id" not in response_headers
         assert json.loads(body)["result"]["ok"] is True
-        change = read_subscription_event()
+        change = timed("response.subscription_change", read_subscription_event)
         assert change["method"] == "notifications/tools/list_changed"
         assert change["params"]["_meta"][
             "io.modelcontextprotocol/subscriptionId"
         ] == "listen-1"
-        subscription_response.close()
-        subscription_connection.close()
+        def close_subscription():
+            subscription_response.close()
+            subscription_connection.close()
+
+        timed("subscription.close", close_subscription)
         subscription_connection = None
 
         # Explicitly close the local correlation group. A modern upstream is
         # allowed to reject DELETE; the recorder still treats this as the
         # caller-owned end of the evidence trace after forwarding it.
-        conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
-        conn.request("DELETE", "/", headers={"X-Mcptracer-Trace": "trace-1"})
-        delete_response = conn.getresponse()
-        delete_response.read()
-        conn.close()
+        def delete_trace():
+            conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
+            try:
+                conn.request("DELETE", "/", headers={"X-Mcptracer-Trace": "trace-1"})
+                response = conn.getresponse()
+                response.read()
+                return response.status
+            finally:
+                conn.close()
 
-        deadline = time.monotonic() + 10
-        source_id = None
-        while time.monotonic() < deadline:
-            conn = sqlite3.connect(db_path)
-            row = conn.execute(
-                "SELECT id FROM sessions WHERE client = ? AND ended_at IS NOT NULL",
-                ("modern-http-source",),
-            ).fetchone()
-            conn.close()
-            if row:
-                source_id = row[0]
-                break
-            time.sleep(0.05)
+        response_statuses["delete"] = timed("delete.request_response", delete_trace)
+
+        def wait_for_writer_finalization():
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                conn = sqlite3.connect(db_path)
+                row = conn.execute(
+                    "SELECT id FROM sessions WHERE client = ? AND ended_at IS NOT NULL",
+                    ("modern-http-source",),
+                ).fetchone()
+                conn.close()
+                if row:
+                    return row[0]
+                time.sleep(0.05)
+            return None
+
+        source_id = timed("writer.finalization_wait", wait_for_writer_finalization)
         assert source_id is not None
 
-        validate = mcptracer("validate", source_id)
+        conn = sqlite3.connect(db_path)
+        source_messages = conn.execute(
+            "SELECT direction, payload FROM messages WHERE session_id = ? ORDER BY seq",
+            (source_id,),
+        ).fetchall()
+        conn.close()
+        captured_list_request = next(
+            json.loads(payload)
+            for direction, payload in source_messages
+            if direction == "c2s" and json.loads(payload).get("method") == "tools/list"
+        )
+        captured_list_response = next(
+            json.loads(payload)
+            for direction, payload in source_messages
+            if direction == "s2c"
+            and json.loads(payload).get("result", {}).get("tools") is not None
+        )
+        assert captured_list_request["params"]["_meta"][
+            "io.example/mcptracer-test"
+        ] == extension_request
+        assert captured_list_response["result"]["ttlMs"] == 30000
+        assert captured_list_response["result"]["cacheScope"] == "private"
+        assert captured_list_response["result"]["extensions"][
+            "io.example/mcptracer-test"
+        ]["revision"] == "fixture-v1"
+        captured_progress = [
+            json.loads(payload)
+            for direction, payload in source_messages
+            if direction == "s2c"
+            and json.loads(payload).get("method") == "notifications/progress"
+        ]
+        assert [item["params"]["progress"] for item in captured_progress] == [1, 2]
+        assert all(
+            item["params"]["progressToken"] == progress_token
+            for item in captured_progress
+        )
+
+        validate = timed(
+            "validation.source", lambda: mcptracer("validate", source_id, "--json")
+        )
         assert validate.returncode == 0, validate.stdout.decode("utf-8", errors="replace")
 
-        replay = mcptracer(
-            "replay-http", source_id,
-            "--target", f"http://127.0.0.1:{upstream_port}/modern",
-            "--client", "modern-http-replayed",
-            "--i-understand-side-effects",
+        replay = timed(
+            "replay_http",
+            lambda: mcptracer(
+                "replay-http", source_id,
+                "--target", f"http://127.0.0.1:{upstream_port}/modern",
+                "--client", "modern-http-replayed",
+                "--i-understand-side-effects",
+            ),
         )
         assert replay.returncode == 0, replay.stderr.decode("utf-8", errors="replace")
         match = re.search(
@@ -3498,9 +3809,88 @@ def test_modern_streamable_http_records_grouped_stateless_calls_and_replays_requ
         )
         assert match, replay.stderr.decode("utf-8", errors="replace")
 
-        diff = mcptracer("diff", source_id, match.group(1), "--ignore-latency")
-        assert diff.returncode == 0, diff.stdout.decode("utf-8", errors="replace")
-        assert b"Sessions match" in diff.stdout
+        replayed_id = match.group(1)
+        diff = timed(
+            "diff",
+            lambda: mcptracer("diff", source_id, replayed_id, "--ignore-latency"),
+        )
+        if diff.returncode != 0 or b"Sessions match" not in diff.stdout:
+            source_health = session_summary(source_id)
+            replay_health = session_summary(replayed_id)
+            stdout_summary = stream_summary(diff.stdout)
+            stderr_summary = stream_summary(diff.stderr)
+            health_values = (source_health["healthy"], replay_health["healthy"])
+            if any(value is False for value in health_values):
+                failure_class = "unhealthy_session_refusal"
+            elif any(value is None for value in health_values):
+                failure_class = "session_health_unavailable"
+            elif diff.returncode == 1 and stdout_summary["byte_count"] > 0:
+                failure_class = "comparison_reported_difference"
+            else:
+                failure_class = "other_diff_failure"
+            evidence = {
+                "failure_class": failure_class,
+                "phase_ms": phase_ms,
+                "response_statuses": response_statuses,
+                "source_session": source_health,
+                "replay_session": replay_health,
+                # Keep channel presence and classification, never print captured
+                # JSON-RPC bodies, request headers or diff payloads in CI logs.
+                "diff": {
+                    "returncode": diff.returncode,
+                    "stdout": stdout_summary,
+                    "stderr": stderr_summary,
+                },
+            }
+            raise AssertionError(
+                "modern HTTP replay diff failed; sanitized diagnostics: "
+                + json.dumps(evidence, sort_keys=True)
+            )
+
+        def replay_and_diff(target_path: str, client: str, label: str) -> subprocess.CompletedProcess:
+            replayed = timed(
+                f"replay_http.{label}",
+                lambda: mcptracer(
+                    "replay-http", source_id,
+                    "--target", f"http://127.0.0.1:{upstream_port}{target_path}",
+                    "--client", client,
+                    "--i-understand-side-effects",
+                ),
+            )
+            stderr_text = replayed.stderr.decode("utf-8", errors="replace")
+            assert replayed.returncode == 0, stderr_text
+            replay_match = re.search(
+                r"HTTP-replaying session \S+ as (\S+) ->", stderr_text
+            )
+            assert replay_match, stderr_text
+            return timed(
+                f"diff.{label}",
+                lambda: mcptracer(
+                    "diff", source_id, replay_match.group(1), "--ignore-latency"
+                ),
+            )
+
+        changed_diff = replay_and_diff(
+            "/modern-changed", "modern-http-cache-changed", "changed_cache_metadata"
+        )
+        changed_stdout = changed_diff.stdout.decode("utf-8", errors="replace")
+        assert changed_diff.returncode == 1, changed_diff.stderr.decode("utf-8", errors="replace")
+        assert "ttlMs" in changed_stdout, changed_stdout
+
+        missing_cache_diff = replay_and_diff(
+            "/modern-missing-cache", "modern-http-cache-missing", "missing_cache_metadata"
+        )
+        missing_cache_stdout = missing_cache_diff.stdout.decode("utf-8", errors="replace")
+        assert missing_cache_diff.returncode == 1, missing_cache_stdout
+        assert "ttlMs" in missing_cache_stdout, missing_cache_stdout
+        assert "cacheScope" in missing_cache_stdout, missing_cache_stdout
+
+        reordered_diff = replay_and_diff(
+            "/modern-reordered", "modern-http-list-reordered", "reordered_tools_list"
+        )
+        reordered_stdout = reordered_diff.stdout.decode("utf-8", errors="replace")
+        assert reordered_diff.returncode == 1, reordered_stdout
+        assert "/tools/0/name" in reordered_stdout, reordered_stdout
 
         with urllib.request.urlopen(
             f"http://127.0.0.1:{upstream_port}/observed", timeout=10
@@ -3513,6 +3903,7 @@ def test_modern_streamable_http_records_grouped_stateless_calls_and_replays_requ
         assert observed["mcp-method"] == "tools/call"
         assert observed["mcp-name"] == "echo"
         assert observed["mcp-param-text"] == "hi"
+        assert observed_response["extension_requests"] == [extension_request] * 5
         assert "mcp-session-id" not in observed
     finally:
         if subscription_connection is not None:
@@ -4917,6 +5308,158 @@ def test_record_fails_fast_when_database_is_locked_at_open_time() -> None:
     assert not process_is_running(server_pid), "a locked database failure orphaned the MCP server"
 
 
+def test_record_queue_byte_pressure_keeps_forwarding_and_marks_unhealthy() -> None:
+    """A real SQLite writer lock holds the storage consumer while bounded,
+    large echo calls pressure the 16 MiB recorder queue. Wire replies must be
+    unchanged despite record drops, then the closed session must fail health.
+    A small control session proves the no-pressure path still exits cleanly.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    binary = build_recorder_binary(repo)
+    fake_server = repo / "tests" / "fake_mcp_server.py"
+
+    def start(client: str, db_path: Path, stderr_path: Path) -> tuple[subprocess.Popen, object]:
+        stderr_file = open(stderr_path, "wb")
+        proc = subprocess.Popen(
+            [str(binary), "--db", str(db_path), "record", "--client", client,
+             "--", sys.executable, str(fake_server)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
+            cwd=repo,
+        )
+        return proc, stderr_file
+
+    def exchange(proc: subprocess.Popen, request: dict) -> dict:
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(frame(request))
+        proc.stdin.flush()
+        response = proc.stdout.readline()
+        assert response, "recorder stopped forwarding while storage was under pressure"
+        return json.loads(response)
+
+    # Unpressured control: both directions record and the process succeeds.
+    control_dir = make_workdir(repo)
+    control_db = control_dir / "control.db"
+    control, control_stderr = start("queue-control", control_db, control_dir / "stderr.txt")
+    try:
+        initialized = exchange(control, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+        })
+        assert initialized["id"] == 1
+        control_response = exchange(control, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"message": "control"}},
+        })
+        assert control_response["result"]["content"][0]["text"] == "Echo: control"
+        control.stdin.close()
+        control_code = control.wait(timeout=20)
+        control_stderr.flush()
+        control_log = (control_dir / "stderr.txt").read_text(encoding="utf-8", errors="replace")
+    finally:
+        stop_process(control)
+        control_stderr.close()
+    assert control_code == 0, control_log
+    control_conn = sqlite3.connect(control_db)
+    assert control_conn.execute("SELECT MAX(dropped_messages) FROM sessions").fetchone()[0] == 0
+    control_conn.close()
+
+    # Pressure run: first let initialization writes finish, then hold a real
+    # exclusive DB writer lock while bounded frames fill the production budget.
+    workdir = make_workdir(repo)
+    db_path = workdir / "pressure.db"
+    stderr_path = workdir / "stderr.txt"
+    proc, stderr_file = start("queue-pressure", db_path, stderr_path)
+    locker = None
+    try:
+        initialized = exchange(proc, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+        })
+        assert initialized["id"] == 1
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            conn = sqlite3.connect(db_path, timeout=0.1)
+            try:
+                count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            finally:
+                conn.close()
+            if count >= 2:
+                break
+            time.sleep(0.02)
+        assert count >= 2, "initialize exchange did not drain before the pressure phase"
+
+        locker = sqlite3.connect(db_path, timeout=0.1)
+        locker.execute("BEGIN EXCLUSIVE")
+        payload = "q" * (4 * 1024 * 1024)
+        for request_id in range(2, 5):
+            message = f"{request_id}:" + payload
+            response = exchange(proc, {
+                "jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                "params": {"name": "echo", "arguments": {"message": message}},
+            })
+            assert response["id"] == request_id
+            assert response["result"]["content"][0]["text"] == f"Echo: {message}"
+
+        stderr_file.flush()
+        assert b"storage queue byte budget exhausted" in stderr_path.read_bytes(), (
+            "large forwarded frames did not actually reach the configured byte bound"
+        )
+        locker.rollback()
+        locker.close()
+        locker = None
+        proc.stdin.close()
+        returncode = proc.wait(timeout=25)
+        stderr_file.flush()
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+    finally:
+        if locker is not None:
+            locker.rollback()
+            locker.close()
+        stop_process(proc)
+        stderr_file.close()
+
+    assert returncode != 0, stderr_text
+    assert "capture lost" in stderr_text.lower(), stderr_text
+    match = re.search(r"recording session (\S+)", stderr_text)
+    assert match, stderr_text
+    session_id = match.group(1)
+
+    conn = sqlite3.connect(db_path)
+    total_messages, dropped_messages, ended_at = conn.execute(
+        "SELECT total_messages, dropped_messages, ended_at FROM sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
+    assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    conn.close()
+    assert ended_at is not None
+    assert dropped_messages > 0
+    assert total_messages + dropped_messages >= 8, (total_messages, dropped_messages)
+
+    invalid = subprocess.run(
+        [str(binary), "--db", str(db_path), "validate", session_id],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=20,
+        check=False,
+    )
+    assert invalid.returncode == 1, invalid.stdout + invalid.stderr
+    assert b"DroppedMessages" in invalid.stdout, invalid.stdout
+
+    spec = workdir / "queue-pressure-assertion.toml"
+    spec.write_text('[[assert]]\nkind = "no_errors"\n', encoding="utf-8")
+    assertion = subprocess.run(
+        [str(binary), "--db", str(db_path), "assert", session_id, "--spec", str(spec)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo,
+        timeout=20,
+        check=False,
+    )
+    assert assertion.returncode != 0
+    assert b"unhealthy" in assertion.stderr.lower(), assertion.stderr
+
+
 def test_record_survives_a_database_lock_that_clears_mid_session() -> None:
     """Gap: nothing covers the database becoming locked *after* recording has
     already started (e.g. another tool briefly opening the same file). Per
@@ -5066,7 +5609,7 @@ def test_record_survives_a_database_lock_that_clears_mid_session() -> None:
 
 
 def test_streamable_http_handles_genuinely_concurrent_sessions() -> None:
-    # Reliability inventory item 7 (docs/tasks/reliability-coverage-inventory.md):
+    # Concurrent logical-session isolation regression:
     # every existing record-http test issues requests sequentially. Here three
     # logical sessions send requests truly in parallel - synchronized on a
     # barrier so they are in flight together - one of them SSE, interleaved
@@ -5266,6 +5809,103 @@ def test_streamable_http_handles_genuinely_concurrent_sessions() -> None:
         stop_process(upstream)
 
 
+
+def test_replay_sends_cancellation_without_waiting_for_a_response() -> None:
+    repo = Path(__file__).resolve().parent.parent
+    db_path = make_workdir(repo) / "cancel-replay.db"
+    fake_server = repo / "tests" / "fake_mcp_cancellation_server.py"
+
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "cancel-test", "version": "1"},
+            },
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 41, "method": "tools/call", "params": {"name": "slow"}},
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 41, "reason": "superseded"},
+        },
+    ]
+    stdin = b"".join(frame(message) for message in messages)
+
+    def mcptracer(*args: str, input_bytes: bytes | None = None, timeout: float = 30) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["cargo", "run", "--quiet", "--bin", "mcptracer", "--", "--db", str(db_path), *args],
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=repo,
+            timeout=timeout,
+            check=False,
+        )
+
+    record = mcptracer(
+        "record", "--client", "cancel-source", "--", sys.executable, str(fake_server),
+        input_bytes=stdin,
+    )
+    assert record.returncode == 0, record.stderr.decode("utf-8", errors="replace")
+
+    conn = sqlite3.connect(db_path)
+    (source_id,) = conn.execute("SELECT id FROM sessions").fetchone()
+    conn.close()
+
+    source_health = mcptracer("validate", source_id, "--json")
+    assert source_health.returncode == 0, source_health.stderr.decode("utf-8", errors="replace")
+    assert json.loads(source_health.stdout)["healthy"] is True
+    source_model = mcptracer("sessions", "show", source_id, "--calls", "--json")
+    assert source_model.returncode == 0, source_model.stderr.decode("utf-8", errors="replace")
+    model = json.loads(source_model.stdout)
+    call = next(exchange for exchange in model["exchanges"] if exchange["method"] == "tools/call")
+    assert call["status"] == "cancelled"
+    assert model["stats"]["cancelled"] == 1
+
+    started = time.monotonic()
+    replay = mcptracer(
+        "replay", source_id, "--request-timeout", "6000", "--i-understand-side-effects",
+        "--", sys.executable, str(fake_server), timeout=15,
+    )
+    elapsed = time.monotonic() - started
+    assert replay.returncode == 0, replay.stderr.decode("utf-8", errors="replace")
+    assert elapsed < 5, f"replay waited for an impossible response for {elapsed:.2f}s"
+
+    conn = sqlite3.connect(db_path)
+    target_id = conn.execute("SELECT id FROM sessions WHERE id != ?", (source_id,)).fetchone()[0]
+    conn.close()
+    target_health = mcptracer("validate", target_id, "--json")
+    assert target_health.returncode == 0, target_health.stderr.decode("utf-8", errors="replace")
+    assert json.loads(target_health.stdout)["healthy"] is True
+
+    completed = mcptracer(
+        "record", "--client", "cancel-completed", "--", sys.executable,
+        str(repo / "tests" / "fake_mcp_server.py"),
+        input_bytes=b"".join(frame(message) for message in messages[:-1]),
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+    conn = sqlite3.connect(db_path)
+    completed_id = conn.execute("SELECT id FROM sessions WHERE client = 'cancel-completed'").fetchone()[0]
+    conn.close()
+    for command in (("diff", source_id, completed_id, "--ignore-latency", "--json"),
+                    ("assert", source_id, "--golden", completed_id, "--json")):
+        comparison = mcptracer(*command)
+        assert comparison.returncode == 1, comparison.stderr.decode("utf-8", errors="replace")
+        report = json.loads(comparison.stdout)
+        contract = json.loads((repo / "schemas" / "diff-report.v4.schema.json").read_text())
+        assert report["schema_version"] == contract["properties"]["schema_version"]["const"] == 4
+        statuses = contract["$defs"]["exchangeStatus"]["enum"]
+        deltas = [delta for change in report["changed"] for delta in change["deltas"]
+                  if delta["kind"] == "status_changed"]
+        assert any("cancelled" in (delta["from"], delta["to"]) for delta in deltas), report
+        assert all(delta["from"] in statuses and delta["to"] in statuses for delta in deltas)
+
+
 if __name__ == "__main__":
     test_proxy_records_session()
     test_sessions_show_calls_json_correlates_exchanges()
@@ -5280,6 +5920,7 @@ if __name__ == "__main__":
     test_assert_manifest_and_offline_verify()
     test_verify_rejects_hostile_manifests()
     test_baseline_lifecycle_and_ci_resolve_composition()
+    test_baseline_promotion_rejects_incomplete_candidate_without_replacing_approval()
     test_json_output_conforms_to_published_schemas()
     test_junit_sarif_and_github_annotation_adapters()
     test_eval_scores_expected_and_forbidden_tool_calls()
@@ -5319,6 +5960,8 @@ if __name__ == "__main__":
     test_record_rejects_a_corrupt_database_without_touching_it()
     test_record_rejects_a_directory_as_the_database_path()
     test_record_fails_fast_when_database_is_locked_at_open_time()
+    test_record_queue_byte_pressure_keeps_forwarding_and_marks_unhealthy()
     test_record_survives_a_database_lock_that_clears_mid_session()
     test_streamable_http_handles_genuinely_concurrent_sessions()
+    test_replay_sends_cancellation_without_waiting_for_a_response()
     print("integration test passed")

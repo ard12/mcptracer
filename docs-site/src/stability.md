@@ -61,17 +61,10 @@ breaking change, called out explicitly in the changelog:
 
 ## Platform evidence
 
-A configured matrix is not proof that a particular commit passed, so this
-records runs rather than configuration. Tests, the Rust **1.85** MSRV check,
-and the real-SDK compatibility matrix have all passed on Linux, macOS, and
-Windows for this snapshot's source revision, including actual execution of the
-Unix file-permission tests. The compatibility matrix's Python stdio cell is
-still non-blocking because of a disclosed, SDK-side flake.
+Publicly accessible hosted test, MSRV, and real-SDK results are pending/unverified for source revision `63c82701aaedb5907885580c5f5a819116846176`. Windows-local checks do not establish Linux or macOS success.
 
-Evidence applies to a specific commit, not to the project in general: check the
-Actions tab for the revision you intend to use. Building from source requires
-Rust **1.85+** and a working C toolchain because `rusqlite` compiles bundled
-SQLite.
+Check the Actions tab for the exact source revision; claims in this section are
+emitted only when matching hosted evidence is supplied to the exporter.
 
 ## What "1.0" will mean
 

@@ -156,6 +156,8 @@ orphan response, dropped messages, an unclosed capture, etc. — see
 pointer to `mcptracer validate` for details. Replay never proceeds from a
 capture MCPTracer cannot vouch for.
 
+For Streamable HTTP cancellation, the protocol signal is closing the POST response stream. Current recordings preserve MCP messages but do not persist that transport close as a terminal exchange event; without a response or a `notifications/cancelled` message, model integrity marks the request unanswered and health-gated `replay-http` refuses the session. It cannot yet reproduce an HTTP cancellation. This differs from the stdio notification path and from the supported captured `subscriptions/listen` stream lifecycle. See the [T-92 design draft](http-cancellation.md) for the event, integrity, compatibility, and replay requirements.
+
 ## Subscription scope boundary
 
 For modern `subscriptions/listen`, replay opens the captured stream first, waits

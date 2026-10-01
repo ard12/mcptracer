@@ -22,7 +22,7 @@ const EXIT_SPEC_ERROR: i32 = 2;
 /// Bump alongside any breaking change to `assert --golden --json`'s shape
 /// (the same `DiffReport` shape `diff --json` emits) and publish a new
 /// `schemas/diff-report.vN.schema.json`.
-const DIFF_REPORT_SCHEMA_VERSION: u32 = 3;
+const DIFF_REPORT_SCHEMA_VERSION: u32 = 4;
 
 /// Bump alongside any breaking change to `assert --spec --json`'s shape and
 /// publish a new `schemas/assert-results.vN.schema.json`. v1 was a bare JSON

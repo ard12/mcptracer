@@ -2418,6 +2418,103 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_page_limit_rolls_back_failed_batch_and_reopens_cleanly() {
+        let dir = std::env::temp_dir().join(format!(
+            "mcptracer-enospc-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bounded.db");
+        let mut store = Store::open(&path).unwrap();
+        let session_id = store
+            .create_session("enospc-test", "synthetic-server", "stdio", 0)
+            .unwrap();
+        store
+            .write_message(&session_id, &make_message(0, "initialize", None))
+            .unwrap();
+        store
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        store
+            .conn
+            .query_row("PRAGMA journal_mode = DELETE", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        let page_count: i64 = store
+            .conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        let page_limit: i64 = store
+            .conn
+            .query_row(
+                &format!("PRAGMA max_page_count = {page_count}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            page_limit, page_count,
+            "SQLite must enforce the bounded page ceiling"
+        );
+
+        let oversized = McpMessage {
+            seq: 2,
+            timestamp_ns: 2,
+            direction: Direction::ClientToServer,
+            payload: json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "synthetic-large-payload",
+                    "arguments": {"bounded_test_blob": "x".repeat(4 * 1024 * 1024)}
+                }
+            }),
+            payload_bytes: 4 * 1024 * 1024,
+        };
+        let small = make_message(1, "tools/list", None);
+        let error = store
+            .write_messages(&session_id, [&small, &oversized])
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").to_lowercase().contains("full"),
+            "{error:#}"
+        );
+        assert_eq!(store.get_messages(&session_id).unwrap().len(), 1);
+        let integrity: String = store
+            .conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.get_messages(&session_id).unwrap().len(), 1);
+        drop(reopened);
+
+        // Reopening removes the per-connection page limit, so the same
+        // database can accept new recording after the bounded failure.
+        let recovered = Store::open(&path).unwrap();
+        recovered
+            .write_message(&session_id, &make_message(1, "tools/list", None))
+            .unwrap();
+        recovered.close_session(&session_id, 3).unwrap();
+        drop(recovered);
+        let final_store = Store::open(&path).unwrap();
+        assert_eq!(final_store.get_messages(&session_id).unwrap().len(), 2);
+        let integrity: String = final_store
+            .conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        drop(final_store);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn merge_resequences_messages_in_source_order() {
         let mut store = Store::open_in_memory().unwrap();
         let first = store.create_session("one", "server", "stdio", 10).unwrap();
