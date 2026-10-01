@@ -18,8 +18,10 @@ regressions fail CI, and keep the recorded evidence locally.
 [Contribute](CONTRIBUTING.md) · [About](ABOUT.md)
 
 > **Noncommercial source preview · pre-1.0.** Commercial use requires written
-> permission from ard12. See [licensing](COMMERCIAL-LICENSE.md). Prebuilt binaries are
-> available as a prerelease; package-manager installs and a released GitHub Action are not yet advertised.
+> permission from ard12. See [licensing](COMMERCIAL-LICENSE.md). The published
+> binaries are the `v0.3.0-rc1` preview. GitHub currently has that release's
+> prerelease flag off; install instructions still pin it explicitly. npm and
+> other package-manager installs are not published.
 
 ## Who is this for?
 
@@ -56,8 +58,15 @@ stored responses without contacting that target.
 
 ## Quick start
 
-**Prebuilt preview — no Rust toolchain needed.** Binaries for Linux, macOS, and
-Windows are published as the `v0.3.0-rc1` prerelease:
+Build this checked revision from source for the current fixes. Existing RC1
+archives predate these changes. The Linux x86_64 RC1 archive requires
+GLIBC_2.39 and fails on Ubuntu 22.04 / glibc 2.35; a corrected prerelease is
+pending. The release and rehearsal pipelines now enforce glibc 2.35 on future
+built and extracted Linux binaries.
+
+**Prebuilt preview: no Rust toolchain needed.** Linux, macOS, and Windows
+binaries are published for the `v0.3.0-rc1` preview. GitHub currently has the
+release's prerelease flag off, so the installer pins the preview tag explicitly:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ard12/mcptracer/main/scripts/install.sh | MCPTRACER_VERSION=v0.3.0-rc1 bash
@@ -137,8 +146,10 @@ stored placeholders, so they may not reproduce calls that require real secrets.
   review evidence before sharing it. See the [security policy](SECURITY.md).
 - MCP compatibility is partial, including newer stateless recording and HTTP
   replay workflows. This preview does not claim full current-spec conformance.
-- Derived analysis commands are advisory. The core workflow is capture,
-  validate, replay, compare, and gate.
+- Derived analysis commands are advisory and an opt-in build. The default
+  binary is the core workflow — capture, validate, replay, compare, and gate.
+  `index`, `route`, `optimize`, and `graph` (Labs) need
+  `--features labs`; see [Installation](docs-site/src/installation.md#labs-commands-opt-in-build).
 - CI is configured for Windows, Linux, and macOS. Check the workflow results for
   the exact commit you use; configured jobs are not proof of a passing run.
 

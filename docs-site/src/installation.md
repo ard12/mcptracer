@@ -1,14 +1,18 @@
 # Installation
 
-This is a pre-1.0 preview. Prebuilt binaries are published as a **prerelease**
-(`v0.3.0-rc1`) for Linux (x86_64, ARM64), macOS (Intel, Apple Silicon), and Windows
-(x86_64). No package-manager install exists yet: npm, PyPI, crates.io, Homebrew,
-and a released GitHub Action are all unpublished.
+This is a pre-1.0 source candidate. Its changes are not included in the existing
+`v0.3.0-rc1` binary archives. Build this revision from source to use these fixes.
+The older RC1 Linux x86_64 archive requires GLIBC_2.39 and cannot run on Ubuntu
+22.04 / glibc 2.35. A corrected binary prerelease remains pending.
+No package-manager install exists yet: npm, PyPI, crates.io and Homebrew remain
+unpublished. The existing RC1 tag contains an install action; no new action tag
+has been released for this source candidate.
 
-## Install the prebuilt preview
+## Install the older prebuilt preview
 
-GitHub's latest-release endpoint deliberately excludes prereleases, so pin the
-version explicitly. On macOS and Linux the variable must sit to the **right** of
+Pin the version explicitly; a mutable Latest badge does not identify source.
+These commands install the older RC1 and do not provide this candidate's fixes.
+On macOS and Linux the variable must sit to the **right** of
 the pipe, attached to `bash`; on the left it would be set for `curl` instead and
 the installer would never see it.
 
@@ -44,6 +48,18 @@ from this repository:
 cargo install --git https://github.com/ard12/mcptracer   --rev <public-commit> mcptracer-proxy --locked
 ```
 
+## Labs commands (opt-in build)
+
+The default build has the core workflow. The derived, advisory `index`,
+`route`, `optimize` and `graph` commands are compiled in only with
+`--features labs`:
+
+```bash
+cargo install --path crates/mcptracer-proxy --features labs --locked
+```
+
+`--features semantic-search` adds `semantic` and includes `labs`.
+
 ## Verifying the source tree
 
 Verify the generated manifest and complete file coverage before building:
@@ -65,13 +81,7 @@ installed binary for version/help checks and the complete rug-pull tutorial.
 
 ## Platform evidence
 
-A configured matrix is not proof that a commit passed, so this section records
-runs rather than configuration. Tests, the Rust 1.85 MSRV check, and the
-real-SDK compatibility matrix have all passed on Linux, macOS, and Windows for
-this snapshot's source revision; the Unix file-permission tests are included in
-that and were confirmed to execute rather than being filtered out. The
-compatibility matrix's Python stdio cell remains non-blocking with a disclosed,
-SDK-side flake — see `docs/spec/compatibility-matrix.md`.
+Publicly accessible hosted test, MSRV, and real-SDK results are pending/unverified for source revision `63c82701aaedb5907885580c5f5a819116846176`. Windows-local checks do not establish Linux or macOS success.
 
 Check the Actions tab for the exact commit you intend to use; that is the only
 evidence that applies to it. Building requires Rust 1.85+ and a working C

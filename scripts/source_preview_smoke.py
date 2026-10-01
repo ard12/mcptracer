@@ -17,6 +17,10 @@ import subprocess
 import sys
 import tempfile
 import time
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility
+    tomllib = None
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -240,6 +244,190 @@ def _assert_version(
     return True
 
 
+_LABS_COMMANDS = {"index", "route", "optimize", "graph"}
+_CORE_COMMANDS = {"record", "validate", "replay", "diff", "assert"}
+_COMMAND_PROBES = {
+    "index": ["index", "rebuild"],
+    "route": ["route", "some-session"],
+    "optimize": ["optimize"],
+    "graph": ["graph"],
+    "semantic": ["semantic", "query"],
+}
+
+
+def _default_enabled_features(manifest: dict[str, object]) -> set[str]:
+    """Resolve default Cargo features through references to local features."""
+    raw_features = manifest.get("features", {})
+    if not isinstance(raw_features, dict):
+        return set()
+    features = {
+        name: values
+        for name, values in raw_features.items()
+        if isinstance(name, str) and isinstance(values, list)
+    }
+    raw_default = features.get("default", [])
+    enabled = {item for item in raw_default if isinstance(item, str)}
+    pending = list(enabled)
+    while pending:
+        name = pending.pop()
+        for item in features.get(name, []):
+            if not isinstance(item, str) or item.startswith("dep:"):
+                continue
+            # dependency/feature and dependency?/feature refer to dependencies.
+            reference = item.split("/", 1)[0].removesuffix("?")
+            if "/" not in item and reference in features and reference not in enabled:
+                enabled.add(reference)
+                pending.append(reference)
+    return enabled
+
+
+def _parse_cargo_features(text: str) -> dict[str, list[str]]:
+    """Read Cargo's simple string-array feature table without Python 3.11."""
+    features: dict[str, list[str]] = {}
+    in_features = False
+    current_name: str | None = None
+    current_value = ""
+    for original_line in text.splitlines():
+        line = original_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            if current_name is not None:
+                features[current_name] = re.findall(r'\"([^\"]*)\"', current_value)
+                current_name = None
+            in_features = line == "[features]"
+            continue
+        if not in_features:
+            continue
+        if current_name is None:
+            match = re.match(r"^([A-Za-z0-9_-]+)\s*=\s*(.*)$", line)
+            if not match:
+                continue
+            current_name, current_value = match.groups()
+        else:
+            current_value += " " + line
+        if "]" in current_value:
+            features[current_name] = re.findall(r'\"([^\"]*)\"', current_value)
+            current_name = None
+            current_value = ""
+    if current_name is not None:
+        features[current_name] = re.findall(r'\"([^\"]*)\"', current_value)
+    return features
+
+
+def _load_package_features(manifest_path: Path) -> dict[str, list[str]]:
+    if tomllib is not None:
+        with manifest_path.open("rb") as handle:
+            manifest = tomllib.load(handle)
+        raw_features = manifest.get("features", {})
+        return raw_features if isinstance(raw_features, dict) else {}
+    return _parse_cargo_features(manifest_path.read_text(encoding="utf-8"))
+
+
+def _default_forbidden_commands(candidate: Path) -> set[str]:
+    """Return commands excluded by this package's default Cargo features."""
+    manifest_path = candidate / "crates" / "mcptracer-proxy" / "Cargo.toml"
+    features = _load_package_features(manifest_path)
+    enabled = _default_enabled_features({"features": features})
+    forbidden: set[str] = set()
+    if "labs" in features and "labs" not in enabled:
+        forbidden.update(_LABS_COMMANDS)
+    if "semantic-search" in features and "semantic-search" not in enabled:
+        forbidden.add("semantic")
+    return forbidden
+
+
+def _command_surface_issues(
+    output: str,
+    exit_code: int,
+    forbidden: set[str],
+) -> list[str]:
+    commands_section = output.split("Commands:", 1)[-1].split("Options:", 1)[0]
+    command_names = re.findall(
+        r"^  ([a-z][a-z0-9-]*)\s",
+        commands_section,
+        re.MULTILINE,
+    )
+    commands = set(command_names)
+    missing = sorted(_CORE_COMMANDS - commands)
+    present = sorted(forbidden & commands)
+    issues = []
+    if exit_code != 0:
+        issues.append(f"--help exited {exit_code}")
+    if missing:
+        issues.append(f"missing core commands: {missing}")
+    if present:
+        issues.append(f"unexpected opt-in commands: {present}")
+    return issues
+
+
+def _assert_default_command_surface(
+    binary: Path,
+    candidate: Path,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    steps: list[Step],
+) -> bool:
+    """Check the command surface expected by this source's default features."""
+    try:
+        forbidden = _default_forbidden_commands(candidate)
+    except (OSError, ValueError) as error:
+        print(f"FAIL read Cargo feature defaults: {error}", file=sys.stderr)
+        return False
+    probes = [("default binary core command surface", ["--help"])]
+    probes.extend(
+        (f"default binary rejects {name}", _COMMAND_PROBES[name])
+        for name in sorted(forbidden)
+    )
+    ok = True
+    for name, arguments in probes:
+        command = [str(binary), *arguments]
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=cwd,
+                env=env,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            output = completed.stdout or ""
+            exit_code = completed.returncode
+        except OSError as error:
+            output = str(error)
+            exit_code = 127
+        duration = round(time.monotonic() - started, 3)
+
+        if arguments == ["--help"]:
+            issues = _command_surface_issues(output, exit_code, forbidden)
+            passed = not issues
+            if issues:
+                output = "; ".join(issues) + "\n" + output
+        else:
+            passed = exit_code != 0 and "unrecognized subcommand" in output.lower()
+
+        steps.append(
+            Step(
+                name=name,
+                command=_display_command(command),
+                exit_code=0 if passed else (exit_code or 1),
+                duration_seconds=duration,
+                output_tail=None if passed else output[-8000:],
+            )
+        )
+        if passed:
+            print(f"PASS {name} ({duration:.1f}s)")
+        else:
+            print(f"FAIL {name}", file=sys.stderr)
+            if output:
+                print(output[-8000:], file=sys.stderr)
+            ok = False
+    return ok
+
+
 def _run_binary_checks(
     binary: Path,
     candidate: Path,
@@ -266,6 +454,15 @@ def _run_binary_checks(
             return False, None
 
     if not _assert_version(binary, expected_version, cwd=candidate, env=env, steps=steps):
+        return False, None
+
+    if not _assert_default_command_surface(
+        binary,
+        candidate,
+        cwd=candidate,
+        env=env,
+        steps=steps,
+    ):
         return False, None
 
     try:

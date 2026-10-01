@@ -1,0 +1,3 @@
+[[assert]]
+kind = "tools_pinned"
+hashes = { send_email = "71b16153538d57492ff567acb21ef71dd253af2d690bd7d98d33df62e180ae6e" }

@@ -10,25 +10,33 @@ pacing, not a promise.
 If you get stuck, skip to [Troubleshooting](#troubleshooting) before asking
 the maintainer — most of what goes wrong here has a one-line fix.
 
-## 1. Install (a few minutes, mostly compiling)
+## 1. Install the checked source candidate
 
-No release has been published yet. npm, PyPI, crates.io, and Homebrew
-packages are all unpublished, so **building from source is the only path
-that works today.** Follow the "Build from source" section of
-[Installation](../docs-site/src/installation.md) — skip the parts of that
-page about downloading a release archive or verifying a checksum, since
-there is nothing published to download. You'll need Rust 1.85+ and a working
-C toolchain (MSVC Build Tools and the Windows SDK, on Windows) because a
-bundled SQLite gets compiled in.
+Build the checked revision using [Installation](../docs-site/src/installation.md)
+to use the current setup/undo and inspector fixes. The older published RC1
+archives do not include them. Its Linux x86_64 archive cannot run on Ubuntu
+22.04 / glibc 2.35 because it requires GLIBC_2.39; a corrected prerelease is
+pending.
 
-Confirm it worked before moving on:
+### Older published preview
+
+A `v0.3.0-rc1` preview binary release is available. Follow the
+[Installing the preview](../docs-site/src/installation.md#installing-the-preview)
+steps and pin that version explicitly; the installer does not select an
+RC-tagged version implicitly. The installer verifies the archive checksum
+before replacing an existing binary. npm, PyPI, crates.io, and Homebrew
+packages are not published, so use the binary installer or build from source.
+
+Confirm the installed version before moving on:
 
 ```bash
 mcptracer --version
 ```
 
-If that fails with a "command not found" error, see
-[Troubleshooting](#mcptracer-command-not-found).
+If you build from source instead, follow
+[Build from source](../docs-site/src/installation.md#build-from-source). It
+requires Rust 1.85+ and a working C toolchain (MSVC Build Tools and the Windows
+SDK, on Windows) because bundled SQLite is compiled locally.
 
 ## 2. Wrap your client (2 minutes) — the step people get wrong
 
@@ -38,6 +46,7 @@ Pick your client and run one of:
 
 ```bash
 mcptracer setup claude-desktop
+mcptracer setup claude-code
 mcptracer setup cursor
 mcptracer setup codex
 mcptracer setup vscode
@@ -49,6 +58,7 @@ rather than guessed:
 | Client | Windows | macOS | Linux | Servers key |
 | --- | --- | --- | --- | --- |
 | `claude-desktop` | `%APPDATA%\Claude\claude_desktop_config.json` | `~/Library/Application Support/Claude/claude_desktop_config.json` | `$XDG_CONFIG_HOME/Claude/claude_desktop_config.json` (falls back to `~/.config/...`) | `mcpServers` |
+| `claude-code` | `.mcp.json` in the current project directory | same | same | `mcpServers` |
 | `cursor` | `~/.cursor/mcp.json` (same path on every OS) | same | same | `mcpServers` |
 | `codex` | `~/.codex/config.toml` (same path on every OS) | same | same | `[mcp_servers]` TOML table |
 | `vscode` | `%APPDATA%\Code\User\mcp.json` | `~/Library/Application Support/Code/User/mcp.json` | `$XDG_CONFIG_HOME/Code/User/mcp.json` (falls back to `~/.config/...`) | `servers` |
@@ -60,6 +70,10 @@ A few things worth knowing before you run it:
   recording will happen for it. If everything in your config is HTTP/SSE,
   `setup` will report that it found no unwrapped stdio servers and change
   nothing.
+- **Claude Code uses project scope.** Run `mcptracer setup claude-code` from
+  the project root. Claude Code marks the entry pending until you trust the
+  workspace and approve the server in its MCP panel; review the server command
+  before approving. See the [official MCP guide](https://code.claude.com/docs/en/mcp#project-server-approvals-and-workspace-trust).
 - **The `command` it writes is an absolute path**, not the bare word
   `mcptracer`. Desktop apps are launched by the OS with a minimal `PATH` that
   usually excludes `~/.local/bin` or your cargo bin directory, so a bare

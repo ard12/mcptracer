@@ -3,9 +3,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, ValueEnum};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 const BACKUP_SUFFIX: &str = ".mcptracer.bak";
+const BACKUP_METADATA_SUFFIX: &str = ".meta";
 
 #[derive(Args)]
 pub struct SetupArgs {
@@ -17,6 +20,15 @@ pub struct SetupArgs {
     #[arg(long)]
     pub undo: bool,
 
+    /// Restore a setup backup even when its ownership metadata is missing or
+    /// the active configuration changed after setup. Review both files first.
+    #[arg(long, requires = "undo")]
+    pub force: bool,
+
+    /// Wrap all detected clients that have configured stdio MCP servers.
+    #[arg(long)]
+    pub all: bool,
+
     /// Override the discovered client configuration path.
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -25,6 +37,7 @@ pub struct SetupArgs {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum SetupClient {
     ClaudeDesktop,
+    ClaudeCode,
     Cursor,
     Codex,
     Vscode,
@@ -34,6 +47,7 @@ impl SetupClient {
     fn display_name(self) -> &'static str {
         match self {
             Self::ClaudeDesktop => "claude-desktop",
+            Self::ClaudeCode => "claude-code",
             Self::Cursor => "cursor",
             Self::Codex => "codex",
             Self::Vscode => "vscode",
@@ -41,10 +55,17 @@ impl SetupClient {
     }
 
     fn config_path(self) -> Result<PathBuf> {
+        if matches!(self, Self::ClaudeCode) {
+            return Ok(std::env::current_dir()
+                .context("could not determine the current working directory")?
+                .join(".mcp.json"));
+        }
+
         let home = dirs::home_dir()
             .ok_or_else(|| anyhow!("could not determine the user home directory"))?;
 
         match self {
+            Self::ClaudeCode => unreachable!("Claude Code project path returned above"),
             Self::ClaudeDesktop => {
                 #[cfg(target_os = "windows")]
                 {
@@ -101,11 +122,18 @@ impl SetupClient {
 
     fn json_server_key(self) -> Option<&'static str> {
         match self {
-            Self::ClaudeDesktop | Self::Cursor => Some("mcpServers"),
+            Self::ClaudeDesktop | Self::ClaudeCode | Self::Cursor => Some("mcpServers"),
             Self::Vscode => Some("servers"),
             Self::Codex => None,
         }
     }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct UndoMetadata {
+    format_version: u32,
+    client: String,
+    expected_config_sha256: String,
 }
 
 struct SetupResult {
@@ -117,16 +145,32 @@ struct SetupResult {
     backup_path: Option<PathBuf>,
 }
 
-pub async fn run(args: SetupArgs) -> Result<()> {
+pub async fn run(args: SetupArgs, requested_db_path: Option<PathBuf>) -> Result<()> {
     if args.undo {
         return run_undo(args);
     }
+    if args.force {
+        return Err(anyhow!("--force requires --undo"));
+    }
 
-    let client = args.client.ok_or_else(|| {
-        anyhow!("a client is required; use claude-desktop, cursor, codex, or vscode")
-    })?;
+    let db_path = requested_db_path
+        .as_deref()
+        .map(resolve_db_path)
+        .transpose()?;
+    let recording_db_path = db_path
+        .clone()
+        .unwrap_or_else(mcptracer_storage::default_db_path);
+    if args.all {
+        return run_all(args, db_path.as_deref());
+    }
+
+    let client = match args.client {
+        Some(client) => client,
+        None => return run_status(args),
+    };
+
     let path = args.config.unwrap_or(client.config_path()?);
-    let result = inject_config(client, &path)?;
+    let result = inject_config_with_db(client, &path, db_path.as_deref())?;
 
     if result.wrapped_servers == 0 {
         if result.total_stdio_servers == 0 {
@@ -163,7 +207,7 @@ pub async fn run(args: SetupArgs) -> Result<()> {
         );
         println!(
             "[mcptracer] recordings will be stored at {}",
-            mcptracer_storage::default_db_path().display()
+            recording_db_path.display()
         );
         println!("[mcptracer] see them with: mcptracer sessions list");
         println!(
@@ -174,10 +218,177 @@ pub async fn run(args: SetupArgs) -> Result<()> {
     Ok(())
 }
 
+fn run_status(args: SetupArgs) -> Result<()> {
+    if args.config.is_some() {
+        return Err(anyhow!("--config requires a specific client"));
+    }
+
+    println!("[mcptracer] Discovered MCP client configurations:\n");
+    let mut detected_with_servers = 0;
+
+    for client in [
+        SetupClient::ClaudeDesktop,
+        SetupClient::ClaudeCode,
+        SetupClient::Cursor,
+        SetupClient::Codex,
+        SetupClient::Vscode,
+    ] {
+        let path = match client.config_path() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let exists = path.exists();
+        let backup = backup_path(&path).exists();
+
+        if !exists {
+            println!(
+                "  [Not found]  {:16} {}",
+                client.display_name(),
+                path.display()
+            );
+            continue;
+        }
+
+        match read_config(&path) {
+            Ok(content) => {
+                let dummy_cmd = "mcptracer";
+                let inspection = if client.is_toml() {
+                    inject_toml(&content, client, dummy_cmd)
+                } else {
+                    inject_json(&content, client, dummy_cmd)
+                };
+
+                match inspection {
+                    Ok((_, total_stdio, newly_wrapped)) => {
+                        let already_wrapped = total_stdio.saturating_sub(newly_wrapped);
+                        let status_str = if total_stdio == 0 {
+                            "0 servers configured".to_string()
+                        } else if newly_wrapped == 0 {
+                            format!("{total_stdio} server(s) configured (all wrapped)")
+                        } else {
+                            format!(
+                                "{total_stdio} server(s) configured ({already_wrapped} wrapped, {newly_wrapped} unwrapped)"
+                            )
+                        };
+                        let backup_str = if backup { " [backup exists]" } else { "" };
+                        println!(
+                            "  [Found]      {:16} {status_str}{backup_str}\n               ({})\n",
+                            client.display_name(),
+                            path.display()
+                        );
+                        if newly_wrapped > 0 {
+                            detected_with_servers += 1;
+                        }
+                    }
+                    Err(err) => {
+                        println!(
+                            "  [Warning]    {:16} file exists but could not parse: {err}\n               ({})\n",
+                            client.display_name(),
+                            path.display()
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                println!(
+                    "  [Warning]    {:16} could not read file: {err}\n               ({})\n",
+                    client.display_name(),
+                    path.display()
+                );
+            }
+        }
+    }
+
+    println!("[mcptracer] Quick actions:");
+    println!(
+        "  Wrap a specific client:  mcptracer setup <client> (e.g. mcptracer setup claude-desktop)"
+    );
+    if detected_with_servers > 0 {
+        println!("  Wrap all detected:       mcptracer setup --all");
+    }
+    println!("  Restore backups:         mcptracer setup --undo");
+
+    Ok(())
+}
+
+fn run_all(args: SetupArgs, db_path: Option<&Path>) -> Result<()> {
+    let recording_db_path = db_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(mcptracer_storage::default_db_path);
+    if args.config.is_some() {
+        return Err(anyhow!("--config cannot be used with --all"));
+    }
+
+    let mut wrapped_clients = 0;
+    let mut total_wrapped = 0;
+
+    for client in [
+        SetupClient::ClaudeDesktop,
+        SetupClient::ClaudeCode,
+        SetupClient::Cursor,
+        SetupClient::Codex,
+        SetupClient::Vscode,
+    ] {
+        let path = match client.config_path() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if !path.exists() {
+            continue;
+        }
+
+        match inject_config_with_db(client, &path, db_path) {
+            Ok(res) => {
+                if res.wrapped_servers > 0 {
+                    let backup = res.backup_path.expect("wrapped server must have backup");
+                    println!(
+                        "[mcptracer] wrapped {} stdio server(s) for {} in {} (backup: {})",
+                        res.wrapped_servers,
+                        client.display_name(),
+                        path.display(),
+                        backup.display()
+                    );
+                    wrapped_clients += 1;
+                    total_wrapped += res.wrapped_servers;
+                } else if res.total_stdio_servers > 0 {
+                    println!(
+                        "[mcptracer] all {} stdio server(s) for {} are already wrapped",
+                        res.total_stdio_servers,
+                        client.display_name()
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "[mcptracer] warning: failed to wrap {}: {}",
+                    client.display_name(),
+                    err
+                );
+            }
+        }
+    }
+
+    if wrapped_clients > 0 {
+        println!(
+            "\n[mcptracer] Successfully wrapped {total_wrapped} server(s) across {wrapped_clients} client(s)."
+        );
+        println!("[mcptracer] Restart your client(s) completely for the changes to take effect.");
+        println!(
+            "[mcptracer] Recordings will be saved to {}",
+            recording_db_path.display()
+        );
+        println!("[mcptracer] Undo anytime with: mcptracer setup --undo");
+    } else {
+        println!("[mcptracer] No unwrapped stdio servers found across detected clients.");
+    }
+
+    Ok(())
+}
+
 fn run_undo(args: SetupArgs) -> Result<()> {
     if let Some(client) = args.client {
         let path = args.config.unwrap_or(client.config_path()?);
-        restore_config(client, &path)?;
+        restore_config(client, &path, args.force)?;
         println!(
             "[mcptracer] restored {} configuration from its backup: {}",
             client.display_name(),
@@ -192,13 +403,14 @@ fn run_undo(args: SetupArgs) -> Result<()> {
     let mut restored = 0;
     for client in [
         SetupClient::ClaudeDesktop,
+        SetupClient::ClaudeCode,
         SetupClient::Cursor,
         SetupClient::Codex,
         SetupClient::Vscode,
     ] {
         let path = client.config_path()?;
         if backup_path(&path).exists() {
-            restore_config(client, &path)?;
+            restore_config(client, &path, args.force)?;
             println!(
                 "[mcptracer] restored {} configuration from its backup: {}",
                 client.display_name(),
@@ -213,7 +425,16 @@ fn run_undo(args: SetupArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn inject_config(client: SetupClient, path: &Path) -> Result<SetupResult> {
+    inject_config_with_db(client, path, None)
+}
+
+fn inject_config_with_db(
+    client: SetupClient,
+    path: &Path,
+    db_path: Option<&Path>,
+) -> Result<SetupResult> {
     let original = read_config(path)?;
     // Resolved once, here, rather than inside wrap_json_server/wrap_toml_server:
     // those stay pure functions that a unit test can call with an arbitrary
@@ -221,9 +442,9 @@ fn inject_config(client: SetupClient, path: &Path) -> Result<SetupResult> {
     // current_exe() of whatever binary happens to be running the test suite.
     let mcptracer_command = resolve_mcptracer_command();
     let (updated, total_stdio_servers, wrapped_servers) = if client.is_toml() {
-        inject_toml(&original, client, &mcptracer_command)?
+        inject_toml_with_db(&original, client, &mcptracer_command, db_path)?
     } else {
-        inject_json(&original, client, &mcptracer_command)?
+        inject_json_with_db(&original, client, &mcptracer_command, db_path)?
     };
 
     if wrapped_servers == 0 {
@@ -241,7 +462,13 @@ fn inject_config(client: SetupClient, path: &Path) -> Result<SetupResult> {
             backup_path.display()
         ));
     }
-    write_with_backup(path, &original, updated.as_bytes(), &backup_path)?;
+    if backup_metadata_path(path).exists() {
+        return Err(anyhow!(
+            "refusing to overwrite existing MCPTracer undo metadata {}; inspect it before retrying",
+            backup_metadata_path(path).display()
+        ));
+    }
+    write_with_backup(client, path, &original, updated.as_bytes(), &backup_path)?;
     Ok(SetupResult {
         wrapped_servers,
         total_stdio_servers,
@@ -249,23 +476,84 @@ fn inject_config(client: SetupClient, path: &Path) -> Result<SetupResult> {
     })
 }
 
-fn restore_config(client: SetupClient, path: &Path) -> Result<()> {
+fn restore_config(client: SetupClient, path: &Path, force: bool) -> Result<()> {
     let backup_path = backup_path(path);
-    let backup = read_config(&backup_path).with_context(|| {
+    let backup = fs::read(&backup_path).with_context(|| {
         format!(
             "no MCPTracer backup exists for {}; cannot undo",
             path.display()
         )
     })?;
+    let backup_text = std::str::from_utf8(&backup)
+        .context("refusing to restore a configuration backup that is not UTF-8")?;
 
     if client.is_toml() {
-        toml::from_str::<toml::Value>(&backup)
+        toml::from_str::<toml::Value>(backup_text)
             .context("refusing to restore an invalid TOML backup")?;
     } else {
-        serde_json::from_str::<Value>(&backup)
-            .context("refusing to restore an invalid JSON backup")?;
+        let jsonc_compatible = strip_jsonc(backup_text);
+        serde_json::from_str::<Value>(&jsonc_compatible)
+            .context("refusing to restore an invalid JSON/JSONC backup")?;
     }
-    replace_file(path, backup.as_bytes())?;
+
+    let metadata_path = backup_metadata_path(path);
+    let current = match fs::read(path) {
+        Ok(current) => Some(current),
+        Err(_) if force => None,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "cannot verify whether {} changed after MCPTracer setup; review the active config and backup, then use --undo --force to override",
+                    path.display()
+                )
+            })
+        }
+    };
+    let already_restored = current.as_deref() == Some(backup.as_slice());
+
+    // If a previous undo already restored the exact backup bytes, completing
+    // cleanup cannot overwrite an intervening edit. This also recovers safely
+    // when cleanup removed metadata but failed to remove the backup.
+    if !already_restored && !force {
+        let metadata_bytes = fs::read(&metadata_path).with_context(|| {
+            format!(
+                "undo ownership cannot be verified for {}; its backup predates conflict tracking or its metadata is missing. Review the active config and backup, then use --undo --force to override",
+                path.display()
+            )
+        })?;
+        let metadata: UndoMetadata = serde_json::from_slice(&metadata_bytes)
+            .context("refusing undo because MCPTracer backup ownership metadata is invalid")?;
+        if metadata.format_version != 1 || metadata.client != client.display_name() {
+            return Err(anyhow!(
+                "refusing undo because MCPTracer backup ownership metadata does not match this client; review the config and backup, then use --undo --force to override"
+            ));
+        }
+        let current = current
+            .as_deref()
+            .expect("a missing config returned an error unless force was requested");
+        if sha256_hex(current) != metadata.expected_config_sha256 {
+            return Err(anyhow!(
+                "refusing to overwrite {}; it changed after MCPTracer setup. The active config and backup are preserved; review both, then use --undo --force to override",
+                path.display()
+            ));
+        }
+    }
+
+    if !already_restored {
+        replace_file(path, &backup)?;
+    }
+
+    // Remove metadata first. If that fails, the backup stays available and a
+    // retry can recognize the already-restored bytes and finish cleanup.
+    match fs::remove_file(&metadata_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to remove undo metadata {}", metadata_path.display())
+            })
+        }
+    }
     fs::remove_file(&backup_path)
         .with_context(|| format!("failed to remove restored backup {}", backup_path.display()))?;
     Ok(())
@@ -279,6 +567,15 @@ fn inject_json(
     original: &str,
     client: SetupClient,
     mcptracer_command: &str,
+) -> Result<(String, usize, usize)> {
+    inject_json_with_db(original, client, mcptracer_command, None)
+}
+
+fn inject_json_with_db(
+    original: &str,
+    client: SetupClient,
+    mcptracer_command: &str,
+    db_path: Option<&Path>,
 ) -> Result<(String, usize, usize)> {
     // VS Code's `mcp.json` is documented to accept JSONC: `//` and `/* */`
     // comments, plus trailing commas before `}`/`]`. Try strict JSON first -
@@ -324,7 +621,7 @@ fn inject_json(
             continue;
         }
         total_stdio_servers += 1;
-        if wrap_json_server(server_object, client, mcptracer_command)? {
+        if wrap_json_server(server_object, client, mcptracer_command, db_path)? {
             wrapped_servers += 1;
         }
     }
@@ -506,6 +803,7 @@ fn wrap_json_server(
     server: &mut Map<String, Value>,
     client: SetupClient,
     mcptracer_command: &str,
+    db_path: Option<&Path>,
 ) -> Result<bool> {
     let command = server
         .get("command")
@@ -515,7 +813,7 @@ fn wrap_json_server(
     if is_mcptracer_record_wrapper(command, &args) {
         return Ok(false);
     }
-    let wrapped_args = wrapped_args(client, command, &args);
+    let wrapped_args = wrapped_args(client, command, &args, db_path)?;
     server.insert(
         "command".to_string(),
         Value::String(mcptracer_command.to_string()),
@@ -534,6 +832,15 @@ fn inject_toml(
     client: SetupClient,
     mcptracer_command: &str,
 ) -> Result<(String, usize, usize)> {
+    inject_toml_with_db(original, client, mcptracer_command, None)
+}
+
+fn inject_toml_with_db(
+    original: &str,
+    client: SetupClient,
+    mcptracer_command: &str,
+    db_path: Option<&Path>,
+) -> Result<(String, usize, usize)> {
     let mut root = toml::from_str::<toml::Value>(original)
         .context("refusing to modify an invalid TOML MCP configuration")?;
     let servers = root
@@ -551,7 +858,7 @@ fn inject_toml(
             continue;
         }
         total_stdio_servers += 1;
-        if wrap_toml_server(server_table, client, mcptracer_command)? {
+        if wrap_toml_server(server_table, client, mcptracer_command, db_path)? {
             wrapped_servers += 1;
         }
     }
@@ -578,6 +885,7 @@ fn wrap_toml_server(
     server: &mut toml::map::Map<String, toml::Value>,
     client: SetupClient,
     mcptracer_command: &str,
+    db_path: Option<&Path>,
 ) -> Result<bool> {
     let command = server
         .get("command")
@@ -587,7 +895,7 @@ fn wrap_toml_server(
     if is_mcptracer_record_wrapper(command, &args) {
         return Ok(false);
     }
-    let wrapped_args = wrapped_args(client, command, &args);
+    let wrapped_args = wrapped_args(client, command, &args, db_path)?;
     server.insert(
         "command".to_string(),
         toml::Value::String(mcptracer_command.to_string()),
@@ -633,16 +941,28 @@ fn toml_args(value: Option<&toml::Value>) -> Result<Vec<String>> {
         .collect()
 }
 
-fn wrapped_args(client: SetupClient, command: &str, args: &[String]) -> Vec<String> {
-    let mut wrapped = vec![
+fn wrapped_args(
+    client: SetupClient,
+    command: &str,
+    args: &[String],
+    db_path: Option<&Path>,
+) -> Result<Vec<String>> {
+    let mut wrapped = Vec::new();
+    if let Some(db_path) = db_path {
+        let db_path = db_path
+            .to_str()
+            .ok_or_else(|| anyhow!("database path cannot be represented in client config"))?;
+        wrapped.extend(["--db".to_string(), db_path.to_string()]);
+    }
+    wrapped.extend([
         "record".to_string(),
         "--client".to_string(),
         client.display_name().to_string(),
         "--".to_string(),
         command.to_string(),
-    ];
+    ]);
     wrapped.extend(args.iter().cloned());
-    wrapped
+    Ok(wrapped)
 }
 
 fn is_mcptracer_record_wrapper(command: &str, args: &[String]) -> bool {
@@ -651,9 +971,25 @@ fn is_mcptracer_record_wrapper(command: &str, args: &[String]) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or(command)
         .to_ascii_lowercase();
+    let command_index = if args.first().is_some_and(|arg| arg == "--db") && args.len() >= 3 {
+        2
+    } else {
+        0
+    };
     matches!(executable.as_str(), "mcptracer" | "mcptracer.exe")
-        && args.first().is_some_and(|arg| arg == "record")
-        && args.get(1).is_some_and(|arg| arg == "--client")
+        && args.get(command_index).is_some_and(|arg| arg == "record")
+        && args
+            .get(command_index + 1)
+            .is_some_and(|arg| arg == "--client")
+}
+
+fn resolve_db_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()
+        .context("could not determine the current working directory")?
+        .join(path))
 }
 
 /// Resolves the absolute path to the currently running `mcptracer` binary,
@@ -731,12 +1067,23 @@ fn backup_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{name}{BACKUP_SUFFIX}"))
 }
 
+fn backup_metadata_path(path: &Path) -> PathBuf {
+    let mut metadata = backup_path(path).into_os_string();
+    metadata.push(BACKUP_METADATA_SUFFIX);
+    PathBuf::from(metadata)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 fn read_config(path: &Path) -> Result<String> {
     fs::read_to_string(path)
         .with_context(|| format!("failed to read configuration {}", path.display()))
 }
 
 fn write_with_backup(
+    client: SetupClient,
     path: &Path,
     original: &str,
     updated: &[u8],
@@ -748,12 +1095,29 @@ fn write_with_backup(
             backup_path.display()
         )
     })?;
-    replace_file(path, updated).with_context(|| {
+    let metadata_path = backup_metadata_path(path);
+    let metadata = UndoMetadata {
+        format_version: 1,
+        client: client.display_name().to_string(),
+        expected_config_sha256: sha256_hex(updated),
+    };
+    let metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
+    replace_file(&metadata_path, &metadata_bytes).with_context(|| {
         format!(
-            "configuration replacement failed; original is retained at {}",
-            backup_path.display()
+            "failed to write undo ownership metadata {}",
+            metadata_path.display()
         )
-    })
+    })?;
+    if let Err(error) = replace_file(path, updated) {
+        let _ = fs::remove_file(&metadata_path);
+        return Err(error).with_context(|| {
+            format!(
+                "configuration replacement failed; original is retained at {}",
+                backup_path.display()
+            )
+        });
+    }
+    Ok(())
 }
 
 fn replace_file(path: &Path, contents: &[u8]) -> Result<()> {
@@ -789,12 +1153,13 @@ fn replace_file(path: &Path, contents: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use serde_json::Value;
 
     use super::{
-        backup_path, inject_config, inject_json, inject_toml, is_mcptracer_record_wrapper,
+        backup_metadata_path, backup_path, inject_config, inject_json, inject_json_with_db,
+        inject_toml, inject_toml_with_db, is_mcptracer_record_wrapper, resolve_db_path,
         resolve_mcptracer_command, restore_config, strip_jsonc, SetupClient,
     };
 
@@ -829,6 +1194,42 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_targets_project_mcp_json_and_uses_distinct_identity() {
+        assert_eq!(SetupClient::ClaudeCode.display_name(), "claude-code");
+        assert_eq!(
+            SetupClient::ClaudeCode.config_path().unwrap(),
+            std::env::current_dir().unwrap().join(".mcp.json")
+        );
+
+        let dir = TestDir::new();
+        let path = dir.path(".mcp.json");
+        let original = r#"{"mcpServers":{"local":{"command":"python","args":["server.py"],"env":{"TOKEN":"keep"}}}}"#;
+        fs::write(&path, original).unwrap();
+
+        let result = inject_config(SetupClient::ClaudeCode, &path).unwrap();
+        assert_eq!(result.wrapped_servers, 1);
+        let updated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            updated["mcpServers"]["local"]["args"],
+            serde_json::json!([
+                "record",
+                "--client",
+                "claude-code",
+                "--",
+                "python",
+                "server.py"
+            ])
+        );
+        assert_eq!(updated["mcpServers"]["local"]["env"]["TOKEN"], "keep");
+        let metadata: Value =
+            serde_json::from_slice(&fs::read(backup_metadata_path(&path)).unwrap()).unwrap();
+        assert_eq!(metadata["client"], "claude-code");
+
+        restore_config(SetupClient::ClaudeCode, &path, false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
     fn json_setup_wraps_stdio_servers_preserves_http_and_undoes_exactly() {
         let dir = TestDir::new();
         let path = dir.path("mcp.json");
@@ -844,6 +1245,7 @@ mod tests {
         let result = inject_config(SetupClient::ClaudeDesktop, &path).unwrap();
         assert_eq!(result.wrapped_servers, 1);
         assert!(backup_path(&path).exists());
+        assert!(backup_metadata_path(&path).exists());
 
         let updated: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let local = &updated["mcpServers"]["local"];
@@ -868,9 +1270,65 @@ mod tests {
             "https://example.test/mcp"
         );
 
-        restore_config(SetupClient::ClaudeDesktop, &path).unwrap();
+        restore_config(SetupClient::ClaudeDesktop, &path, false).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
         assert!(!backup_path(&path).exists());
+        assert!(!backup_metadata_path(&path).exists());
+    }
+
+    #[test]
+    fn jsonc_setup_undo_restores_the_original_bytes_exactly() {
+        let dir = TestDir::new();
+        let path = dir.path("vscode-mcp.json");
+        let original = br#"{
+  // preserve this comment and formatting
+  "servers": {
+    "local": { "command": "node", "args": ["server.js",], },
+  },
+}
+"#;
+        fs::write(&path, original).unwrap();
+
+        let result = inject_config(SetupClient::Vscode, &path).unwrap();
+        assert_eq!(result.wrapped_servers, 1);
+        assert_ne!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), original);
+        assert!(backup_metadata_path(&path).exists());
+
+        restore_config(SetupClient::Vscode, &path, false).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!backup_path(&path).exists());
+        assert!(!backup_metadata_path(&path).exists());
+    }
+    #[test]
+    fn setup_undo_path_with_spaces_restores_original_bytes_and_preserves_env() {
+        let dir = TestDir::new();
+        let config_dir = dir.path("client config with spaces");
+        fs::create_dir_all(&config_dir).unwrap();
+        let path = config_dir.join("mcp client.json");
+        let original = br#"{
+  "mcpServers": {
+    "local": {"command":"node","args":["server with spaces.js"],"env":{"TOKEN":"keep"}}
+  }
+}
+"#;
+        fs::write(&path, original).unwrap();
+
+        let result = inject_config(SetupClient::Cursor, &path).unwrap();
+        assert_eq!(result.wrapped_servers, 1);
+        assert!(backup_path(&path).exists());
+        assert!(backup_metadata_path(&path).exists());
+        let updated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(updated["mcpServers"]["local"]["env"]["TOKEN"], "keep");
+        assert_eq!(
+            updated["mcpServers"]["local"]["args"][5],
+            "server with spaces.js"
+        );
+
+        restore_config(SetupClient::Cursor, &path, false).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!backup_path(&path).exists());
+        assert!(!backup_metadata_path(&path).exists());
     }
 
     #[test]
@@ -942,7 +1400,7 @@ url = "https://example.test/mcp"
             Some("https://example.test/mcp")
         );
 
-        restore_config(SetupClient::Codex, &path).unwrap();
+        restore_config(SetupClient::Codex, &path, false).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 
@@ -961,6 +1419,181 @@ url = "https://example.test/mcp"
         assert!(inject_config(SetupClient::Cursor, &invalid_args).is_err());
         assert_eq!(fs::read_to_string(&invalid_args).unwrap(), original);
         assert!(!backup_path(&invalid_args).exists());
+    }
+
+    #[test]
+    fn invalid_jsonc_backup_preserves_current_config_and_backup() {
+        let dir = TestDir::new();
+        let path = dir.path("vscode-mcp.json");
+        fs::write(
+            &path,
+            br#"{"servers":{"local":{"command":"node","args":["server.js"]}}}"#,
+        )
+        .unwrap();
+        inject_config(SetupClient::Vscode, &path).unwrap();
+
+        let backup = backup_path(&path);
+        let invalid_backup = b"{ /* unterminated JSONC";
+        fs::write(&backup, invalid_backup).unwrap();
+        let current = fs::read(&path).unwrap();
+
+        let error = restore_config(SetupClient::Vscode, &path, false).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("refusing to restore an invalid JSON/JSONC backup"));
+        assert_eq!(fs::read(&path).unwrap(), current);
+        assert_eq!(fs::read(&backup).unwrap(), invalid_backup);
+    }
+    #[test]
+    fn undo_refuses_intervening_edits_and_force_restores_from_backup() {
+        let dir = TestDir::new();
+        let path = dir.path("mcp.json");
+        let original = r#"{"mcpServers":{"local":{"command":"node","args":["server.js"]}}}"#;
+        fs::write(&path, original).unwrap();
+        inject_config(SetupClient::Cursor, &path).unwrap();
+
+        let changed = br#"{"mcpServers":{"local":{"command":"node","args":["new-server.js"]}}}"#;
+        fs::write(&path, changed).unwrap();
+        let error = restore_config(SetupClient::Cursor, &path, false).unwrap_err();
+        assert!(error.to_string().contains("changed after MCPTracer setup"));
+        assert_eq!(fs::read(&path).unwrap(), changed);
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), original.as_bytes());
+        assert!(backup_metadata_path(&path).exists());
+
+        restore_config(SetupClient::Cursor, &path, true).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+        assert!(!backup_path(&path).exists());
+        assert!(!backup_metadata_path(&path).exists());
+    }
+
+    #[test]
+    fn setup_leaves_config_untouched_when_backup_write_fails() {
+        let dir = TestDir::new();
+        let path = dir.path("mcp.json");
+        let original = br#"{"mcpServers":{"local":{"command":"node","args":["server.js"]}}}"#;
+        fs::write(&path, original).unwrap();
+        let unavailable_backup = dir.path("missing-parent").join("mcp.json.mcptracer.bak");
+
+        let error = super::write_with_backup(
+            SetupClient::Cursor,
+            &path,
+            std::str::from_utf8(original).unwrap(),
+            original,
+            &unavailable_backup,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("failed to write configuration backup"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!unavailable_backup.exists());
+        assert!(!backup_metadata_path(&path).exists());
+    }
+
+    #[test]
+    fn setup_keeps_backup_when_undo_metadata_write_fails() {
+        let dir = TestDir::new();
+        let path = dir.path("mcp.json");
+        let original = br#"{"mcpServers":{"local":{"command":"node","args":["server.js"]}}}"#;
+        fs::write(&path, original).unwrap();
+        let metadata_temp = dir.path(".mcp.json.mcptracer.bak.meta.mcptracer.tmp");
+        fs::write(&metadata_temp, b"owned by another process").unwrap();
+
+        let error = inject_config(SetupClient::Cursor, &path)
+            .err()
+            .expect("the occupied metadata temporary path must refuse setup");
+        let error_chain = format!("{error:#}");
+        assert!(error_chain.contains("undo ownership metadata"));
+        assert!(error_chain.contains("temporary configuration"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), original);
+        assert!(!backup_metadata_path(&path).exists());
+        assert_eq!(
+            fs::read(&metadata_temp).unwrap(),
+            b"owned by another process"
+        );
+    }
+
+    #[test]
+    fn setup_keeps_original_and_backup_when_config_replace_fails() {
+        let dir = TestDir::new();
+        let path = dir.path("mcp.json");
+        let original = br#"{"mcpServers":{"local":{"command":"node","args":["server.js"]}}}"#;
+        fs::write(&path, original).unwrap();
+        let replace_temp = dir.path(".mcp.json.mcptracer.tmp");
+        fs::write(&replace_temp, b"owned by another process").unwrap();
+
+        let error = inject_config(SetupClient::Cursor, &path)
+            .err()
+            .expect("the occupied temporary path must refuse replacement");
+        assert!(format!("{error:#}").contains("temporary configuration"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), original);
+        assert!(!backup_metadata_path(&path).exists());
+        assert_eq!(
+            fs::read(&replace_temp).unwrap(),
+            b"owned by another process"
+        );
+    }
+
+    #[test]
+    fn interrupted_restore_cleanup_keeps_backup_and_can_be_retried() {
+        let dir = TestDir::new();
+        let path = dir.path("mcp.json");
+        let original = br#"{"mcpServers":{"local":{"command":"node","args":["server.js"]}}}"#;
+        fs::write(&path, original).unwrap();
+        inject_config(SetupClient::Cursor, &path).unwrap();
+
+        let metadata = backup_metadata_path(&path);
+        fs::remove_file(&metadata).unwrap();
+        fs::create_dir(&metadata).unwrap();
+        let error = restore_config(SetupClient::Cursor, &path, true).unwrap_err();
+        assert!(error.to_string().contains("failed to remove undo metadata"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), original);
+        assert!(metadata.is_dir());
+
+        fs::remove_dir(&metadata).unwrap();
+        restore_config(SetupClient::Cursor, &path, false).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!backup_path(&path).exists());
+        assert!(!metadata.exists());
+    }
+
+    #[test]
+    fn legacy_backup_requires_force_and_is_preserved_on_refusal() {
+        let dir = TestDir::new();
+        let path = dir.path("mcp.json");
+        let current = br#"{"mcpServers":{"local":{"command":"mcptracer","args":["record"]}}}"#;
+        let original = br#"{"mcpServers":{"local":{"command":"node","args":["server.js"]}}}"#;
+        fs::write(&path, current).unwrap();
+        fs::write(backup_path(&path), original).unwrap();
+
+        let error = restore_config(SetupClient::Cursor, &path, false).unwrap_err();
+        assert!(error.to_string().contains("predates conflict tracking"));
+        assert_eq!(fs::read(&path).unwrap(), current);
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), original);
+
+        restore_config(SetupClient::Cursor, &path, true).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!backup_path(&path).exists());
+    }
+
+    #[test]
+    fn invalid_undo_metadata_fails_closed_and_force_can_recover() {
+        let dir = TestDir::new();
+        let path = dir.path("mcp.json");
+        let original = r#"{"mcpServers":{"local":{"command":"node","args":["server.js"]}}}"#;
+        fs::write(&path, original).unwrap();
+        inject_config(SetupClient::Cursor, &path).unwrap();
+        let current = fs::read(&path).unwrap();
+        fs::write(backup_metadata_path(&path), b"not metadata").unwrap();
+
+        let error = restore_config(SetupClient::Cursor, &path, false).unwrap_err();
+        assert!(error.to_string().contains("ownership metadata is invalid"));
+        assert_eq!(fs::read(&path).unwrap(), current);
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), original.as_bytes());
+
+        restore_config(SetupClient::Cursor, &path, true).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
     }
 
     #[test]
@@ -1028,6 +1661,57 @@ url = "https://example.test/mcp"
     }
 
     #[test]
+    fn explicit_database_is_written_before_record_for_json_and_toml_clients() {
+        let mcptracer_command = if cfg!(target_os = "windows") {
+            r"C:\Program Files\MCPTracer\mcptracer.exe"
+        } else {
+            "/opt/mcptracer/bin/mcptracer"
+        };
+        let db_path = if cfg!(target_os = "windows") {
+            PathBuf::from(r"D:\test data\sessions.db")
+        } else {
+            PathBuf::from("/tmp/test data/sessions.db")
+        };
+
+        let (json_updated, json_total, json_wrapped) = inject_json_with_db(
+            r#"{"servers":{"local":{"command":"python","args":["server.py"]}}}"#,
+            SetupClient::Vscode,
+            mcptracer_command,
+            Some(&db_path),
+        )
+        .unwrap();
+        assert_eq!((json_total, json_wrapped), (1, 1));
+        let json_value: Value = serde_json::from_str(&json_updated).unwrap();
+        let json_args = json_value["servers"]["local"]["args"].as_array().unwrap();
+        assert_eq!(json_args[0], "--db");
+        assert_eq!(json_args[1], db_path.to_str().unwrap());
+        assert_eq!(json_args[2], "record");
+
+        let (toml_updated, toml_total, toml_wrapped) = inject_toml_with_db(
+            "[mcp_servers.local]\ncommand = \"python\"\nargs = [\"server.py\"]\n",
+            SetupClient::Codex,
+            mcptracer_command,
+            Some(&db_path),
+        )
+        .unwrap();
+        assert_eq!((toml_total, toml_wrapped), (1, 1));
+        let toml_value: toml::Value = toml::from_str(&toml_updated).unwrap();
+        let toml_args = toml_value["mcp_servers"]["local"]["args"]
+            .as_array()
+            .unwrap();
+        assert_eq!(toml_args[0].as_str(), Some("--db"));
+        assert_eq!(toml_args[1].as_str(), db_path.to_str());
+        assert_eq!(toml_args[2].as_str(), Some("record"));
+    }
+
+    #[test]
+    fn explicit_relative_database_path_resolves_from_setup_directory() {
+        let resolved = resolve_db_path(Path::new("test data/sessions.db")).unwrap();
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with(Path::new("test data/sessions.db")));
+    }
+
+    #[test]
     fn already_wrapped_entry_using_absolute_path_is_skipped() {
         let absolute_path = if cfg!(target_os = "windows") {
             r"C:\Users\test\.local\bin\mcptracer.exe"
@@ -1045,6 +1729,16 @@ url = "https://example.test/mcp"
                 "claude-desktop".to_string(),
                 "--".to_string(),
                 "npx".to_string(),
+            ]
+        ));
+        assert!(is_mcptracer_record_wrapper(
+            absolute_path,
+            &[
+                "--db".to_string(),
+                r"D:\test data\sessions.db".to_string(),
+                "record".to_string(),
+                "--client".to_string(),
+                "claude-desktop".to_string(),
             ]
         ));
 
@@ -1379,5 +2073,73 @@ args = ['--data-dir', 'C:\Program Files\Data Dir\', 'positional arg with spaces'
         for (actual, expected) in args.iter().zip(expected.iter()) {
             assert_eq!(actual.as_str(), Some(*expected));
         }
+    }
+
+    #[test]
+    fn mixed_servers_detection_reports_correct_unwrapped_counts() {
+        let json_input = r#"{
+            "mcpServers": {
+                "wrapped": {
+                    "command": "mcptracer",
+                    "args": ["record", "--client", "claude-desktop", "--", "node", "server.js"]
+                },
+                "unwrapped": {
+                    "command": "python",
+                    "args": ["server.py"]
+                },
+                "remote_http": {
+                    "type": "http",
+                    "url": "https://example.com/mcp"
+                }
+            }
+        }"#;
+
+        let (_updated, total_stdio, newly_wrapped) =
+            inject_json(json_input, SetupClient::ClaudeDesktop, "mcptracer").unwrap();
+        assert_eq!(total_stdio, 2);
+        assert_eq!(newly_wrapped, 1);
+        let already_wrapped = total_stdio.saturating_sub(newly_wrapped);
+        assert_eq!(already_wrapped, 1);
+    }
+
+    #[test]
+    fn batch_wrap_and_restore_across_multiple_clients() {
+        let dir = TestDir::new();
+        let claude_path = dir.path("claude_desktop_config.json");
+        let cursor_path = dir.path("cursor_config.json");
+        let codex_path = dir.path("codex_config.toml");
+
+        let claude_orig = r#"{"mcpServers":{"local":{"command":"npx","args":["-y","server"]}}}"#;
+        let cursor_orig = r#"{"mcpServers":{"tool":{"command":"python","args":["tool.py"]}}}"#;
+        let codex_orig = "[mcp_servers.local]\ncommand = \"uvx\"\nargs = [\"server\"]\n";
+
+        fs::write(&claude_path, claude_orig).unwrap();
+        fs::write(&cursor_path, cursor_orig).unwrap();
+        fs::write(&codex_path, codex_orig).unwrap();
+
+        let r1 = inject_config(SetupClient::ClaudeDesktop, &claude_path).unwrap();
+        let r2 = inject_config(SetupClient::Cursor, &cursor_path).unwrap();
+        let r3 = inject_config(SetupClient::Codex, &codex_path).unwrap();
+
+        assert_eq!(r1.wrapped_servers, 1);
+        assert_eq!(r2.wrapped_servers, 1);
+        assert_eq!(r3.wrapped_servers, 1);
+
+        assert!(backup_path(&claude_path).exists());
+        assert!(backup_path(&cursor_path).exists());
+        assert!(backup_path(&codex_path).exists());
+
+        // Restore all
+        restore_config(SetupClient::ClaudeDesktop, &claude_path, false).unwrap();
+        restore_config(SetupClient::Cursor, &cursor_path, false).unwrap();
+        restore_config(SetupClient::Codex, &codex_path, false).unwrap();
+
+        assert_eq!(fs::read_to_string(&claude_path).unwrap(), claude_orig);
+        assert_eq!(fs::read_to_string(&cursor_path).unwrap(), cursor_orig);
+        assert_eq!(fs::read_to_string(&codex_path).unwrap(), codex_orig);
+
+        assert!(!backup_path(&claude_path).exists());
+        assert!(!backup_path(&cursor_path).exists());
+        assert!(!backup_path(&codex_path).exists());
     }
 }

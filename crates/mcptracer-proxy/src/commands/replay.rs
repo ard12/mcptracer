@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -116,10 +116,30 @@ pub async fn run(args: ReplayArgs, db_path: PathBuf) -> Result<()> {
         return Ok(());
     }
 
-    let driven: Vec<&StoredMessage> = driven_messages(&source_messages)
+    let mut driven: Vec<&StoredMessage> = driven_messages(&source_messages)
         .into_iter()
         .filter(|m| tool_is_allowed(m.tool_name.as_deref(), &args.allow_tool, &args.deny_tool))
         .collect();
+    let source_cancellations = cancellation_notifications(&source_messages);
+    let mut cancellations = HashMap::new();
+    for (request_seq, cancellation) in source_cancellations {
+        let Some(position) = driven.iter().position(|message| message.seq == request_seq) else {
+            continue;
+        };
+        if driven.get(position + 1).map(|message| message.seq) != Some(cancellation.seq) {
+            return Err(anyhow!(
+                "cannot replay cancellation for request seq {} because another client message precedes the cancellation; concurrent request replay is not supported",
+                request_seq
+            ));
+        }
+        cancellations.insert(request_seq, cancellation);
+    }
+    let replayed_cancellation_seqs: HashSet<u64> =
+        cancellations.values().map(|message| message.seq).collect();
+    driven.retain(|message| {
+        message.method.as_deref() != Some("notifications/cancelled")
+            || replayed_cancellation_seqs.contains(&message.seq)
+    });
     if driven.is_empty() {
         return Err(anyhow!(
             "source session has no client-originated requests or notifications to replay (after any --allow-tool/--deny-tool filtering)"
@@ -174,6 +194,7 @@ pub async fn run(args: ReplayArgs, db_path: PathBuf) -> Result<()> {
         server_stdin,
         server_stdout,
         &driven,
+        &cancellations,
         &response_lookaside,
         &seq,
         &storage_tx,
@@ -287,6 +308,39 @@ fn redacted_replay_counts(driven: &[&StoredMessage]) -> std::collections::BTreeM
     counts
 }
 
+/// Source cancellation notifications keyed by the request they terminate.
+fn cancellation_notifications(messages: &[StoredMessage]) -> HashMap<u64, &StoredMessage> {
+    let model = correlate(messages);
+    let mut cancellations = HashMap::new();
+    for exchange in model.exchanges {
+        if exchange.status != mcptracer_model::ExchangeStatus::Cancelled {
+            continue;
+        }
+        let (Some(request_seq), Some(rpc_id)) = (exchange.request_seq, exchange.rpc_id) else {
+            continue;
+        };
+        let Ok(expected_rpc_id) = serde_json::from_str::<Value>(&rpc_id) else {
+            continue;
+        };
+        let cancellation = messages.iter().find(|message| {
+            if message.seq <= request_seq
+                || message.direction != "c2s"
+                || message.message_kind != "notification"
+                || message.method.as_deref() != Some("notifications/cancelled")
+            {
+                return false;
+            }
+            serde_json::from_str::<Value>(&message.payload)
+                .ok()
+                .and_then(|payload| payload.pointer("/params/requestId").cloned())
+                .is_some_and(|id| id == expected_rpc_id)
+        });
+        if let Some(cancellation) = cancellation {
+            cancellations.insert(request_seq, cancellation);
+        }
+    }
+    cancellations
+}
 /// Maps a server-initiated request's `rpc_id` to the raw payload of the
 /// source session's `c2s` response, so replay can answer the same way the
 /// original client did. Built via `correlate` so id matching stays scoped to
@@ -314,6 +368,7 @@ async fn drive(
     mut server_stdin: ChildStdin,
     mut server_stdout: ChildStdout,
     driven: &[&StoredMessage],
+    cancellations: &HashMap<u64, &StoredMessage>,
     response_lookaside: &HashMap<String, String>,
     seq: &AtomicU64,
     storage_tx: &SyncSender<StorageEvent>,
@@ -323,8 +378,12 @@ async fn drive(
     let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
     let mut prev_ts_ns: Option<i64> = None;
     let request_timeout = Duration::from_millis(args.request_timeout);
+    let mut sent_cancellations = HashSet::new();
 
     for msg in driven {
+        if sent_cancellations.contains(&msg.seq) {
+            continue;
+        }
         if args.timing == TimingMode::Realtime {
             if let Some(prev) = prev_ts_ns {
                 let delta_ns = msg.ts_ns - prev;
@@ -354,6 +413,48 @@ async fn drive(
             continue;
         }
         let Some(rpc_id) = rpc_id else { continue };
+
+        if let Some(cancel) = cancellations.get(&msg.seq) {
+            if args.timing == TimingMode::Realtime {
+                let delta_ns = cancel.ts_ns - msg.ts_ns;
+                if delta_ns > 0 {
+                    // A cancelled request may still emit progress or other
+                    // notifications before the source cancellation arrived.
+                    // Preserve those server messages while waiting out the
+                    // recorded in-flight interval, without waiting for the
+                    // response that a compliant server must not send.
+                    wait_for_response(
+                        &mut server_stdout,
+                        &mut server_stdin,
+                        &mut buf,
+                        seq,
+                        storage_tx,
+                        dropped_messages,
+                        queue_budget,
+                        &rpc_id,
+                        response_lookaside,
+                        args.strict_server_requests,
+                        Duration::from_nanos(delta_ns as u64),
+                    )
+                    .await?;
+                }
+            }
+            let cancel_value: Value = serde_json::from_str(&cancel.payload).with_context(|| {
+                format!("cancellation message seq {} is not valid JSON", cancel.seq)
+            })?;
+            send_frame(&mut server_stdin, &cancel_value).await?;
+            let sent_cancel = McpMessage {
+                seq: seq.fetch_add(1, Ordering::Relaxed),
+                timestamp_ns: now_ns(),
+                direction: Direction::ClientToServer,
+                payload_bytes: cancel_value.to_string().len(),
+                payload: cancel_value,
+            };
+            try_record(storage_tx, sent_cancel, dropped_messages, queue_budget);
+            sent_cancellations.insert(cancel.seq);
+            prev_ts_ns = Some(cancel.ts_ns);
+            continue;
+        }
 
         match wait_for_response(
             &mut server_stdout,
@@ -552,6 +653,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cancellation_notifications_are_linked_to_the_matching_request() {
+        let request = stored(3, 100, "c2s", "request", Some("41"), Some("tools/call"));
+        let mut cancellation = stored(
+            4,
+            125,
+            "c2s",
+            "notification",
+            None,
+            Some("notifications/cancelled"),
+        );
+        cancellation.payload =
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":41}}"#
+                .to_string();
+
+        let source = [request, cancellation];
+        let cancellations = cancellation_notifications(&source);
+        assert_eq!(cancellations.get(&3).map(|message| message.seq), Some(4));
+    }
     #[test]
     fn driven_messages_excludes_server_traffic_and_client_responses() {
         let msgs = [

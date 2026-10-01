@@ -108,6 +108,32 @@ pub fn require_healthy_session(
     Ok(health)
 }
 
+/// Require a finalized, structurally complete capture before approving an
+/// artifact. Redaction findings are left to the export options: promotion
+/// computes its digest from the redacted artifact or requires explicit
+/// `--allow-unredacted` consent before reaching this check.
+pub fn require_complete_capture(
+    store: &Store,
+    session_id_or_prefix: &str,
+    operation: &str,
+) -> Result<()> {
+    let health = inspect_session(store, session_id_or_prefix)?;
+    let integrity_issues = health
+        .report
+        .issues
+        .iter()
+        .filter(|issue| issue.kind != SessionIntegrityIssueKind::UnredactedSensitiveValue)
+        .count();
+    if integrity_issues > 0 {
+        bail!(
+            "session {} has an incomplete capture and cannot be used for {operation}: {integrity_issues} integrity issue(s); run `mcptracer validate {}` for details",
+            health.session_id,
+            health.session_id,
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use mcptracer_model::SessionIntegrityIssueKind;
@@ -115,7 +141,41 @@ mod tests {
     use mcptracer_storage::Store;
     use serde_json::json;
 
-    use super::inspect_session;
+    use super::{inspect_session, require_complete_capture};
+
+    #[test]
+    fn complete_capture_gate_leaves_redaction_consent_to_export_options() {
+        let store = Store::open_in_memory().unwrap();
+        let session_id = store.create_session("test", "server", "stdio", 0).unwrap();
+        store
+            .set_redaction_policy(&session_id, "default", &[])
+            .unwrap();
+        store
+            .write_message(
+                &session_id,
+                &McpMessage {
+                    seq: 0,
+                    timestamp_ns: 0,
+                    direction: Direction::ClientToServer,
+                    payload: json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/test",
+                        "params": {"api_key": "unmasked"}
+                    }),
+                    payload_bytes: 80,
+                },
+            )
+            .unwrap();
+        store.close_session(&session_id, 1).unwrap();
+
+        let health = inspect_session(&store, &session_id).unwrap();
+        assert!(health
+            .report
+            .issues
+            .iter()
+            .any(|issue| { issue.kind == SessionIntegrityIssueKind::UnredactedSensitiveValue }));
+        require_complete_capture(&store, &session_id, "baseline promotion").unwrap();
+    }
 
     #[test]
     fn rejects_an_unclosed_session() {

@@ -1,0 +1,100 @@
+# Consumer GitHub Actions template for an MCP server author.
+# Copy this file to .github/workflows/mcp-gate.yml and replace the example
+# stdio server command and runtime setup with your project-specific commands.
+# Keep fixtures/baseline.mtrace and its checksum protected on the base branch
+# with branch protection/CODEOWNERS so a pull request cannot approve itself.
+
+name: MCP Server Assurance Gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: MCP Contract & Regression Assurance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout candidate server code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The baseline always comes from the trusted base revision, never the PR
+      # checkout. On pushes to main, github.sha is the trusted main revision.
+      - name: Checkout trusted baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: .mcptracer/trusted-baseline
+          persist-credentials: false
+
+      - name: Install MCPTracer
+        uses: ard12/mcptracer/.github/actions/mcptracer@v0.3.0-rc1
+        with:
+          version: v0.3.0-rc1
+
+      # Add your server runtime/dependency setup here. Example:
+      # - uses: actions/setup-node@v4
+      #   with:
+      #     node-version: 20
+      # - run: npm ci
+
+      - name: Replay trusted baseline and enforce the MCP gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB_PATH="${RUNNER_TEMP}/mcptracer-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.db"
+          BASELINE_FILE=".mcptracer/trusted-baseline/fixtures/baseline.mtrace"
+          REPLAY_LOG="${RUNNER_TEMP}/mcptracer-replay-${GITHUB_RUN_ID}.log"
+          DIFF_REPORT="${RUNNER_TEMP}/mcptracer-diff-${GITHUB_RUN_ID}.json"
+
+          # This checksum file must be committed beside the fixture on the
+          # protected base branch. The install action independently verifies
+          # the pinned MCPTracer release archive against SHA256SUMS.txt.
+          (cd .mcptracer/trusted-baseline && sha256sum -c fixtures/baseline.mtrace.sha256)
+
+          mcptracer import "$BASELINE_FILE" --db "$DB_PATH"
+          SESSIONS_JSON="$(mcptracer sessions list --db "$DB_PATH" --json)"
+          BASELINE_SESSION_ID="$(printf '%s' "$SESSIONS_JSON" | python3 -c 'import json,sys; sessions=json.load(sys.stdin); assert len(sessions)==1, "expected exactly one imported baseline session"; print(sessions[0]["id"])')"
+          mcptracer validate "$BASELINE_SESSION_ID" --db "$DB_PATH"
+
+          # Replay is a real execution with possible side effects. Replace the
+          # sample command with a local, sandboxed test server for this project.
+          mcptracer replay "$BASELINE_SESSION_ID" --db "$DB_PATH" -- node server.js 2>&1 | tee "$REPLAY_LOG"
+          SESSIONS_JSON="$(mcptracer sessions list --db "$DB_PATH" --json)"
+          CANDIDATE_SESSION_ID="$(printf '%s' "$SESSIONS_JSON" | python3 -c 'import json,sys; sessions=json.load(sys.stdin); baseline=sys.argv[1]; candidates=[s for s in sessions if s["id"] != baseline]; assert len(candidates)==1, "expected exactly one replay candidate session"; s=candidates[0]; assert s["ended_at_ns"] is not None, "candidate replay did not finalize"; assert s["dropped_messages"]==0, "candidate replay lost messages"; assert s["total_messages"]>0, "candidate replay recorded no messages"; print(s["id"])' "$BASELINE_SESSION_ID")"
+          mcptracer validate "$CANDIDATE_SESSION_ID" --db "$DB_PATH"
+
+          set +e
+          mcptracer diff "$BASELINE_SESSION_ID" "$CANDIDATE_SESSION_ID" --db "$DB_PATH" --ignore-latency --json > "$DIFF_REPORT"
+          DIFF_STATUS=$?
+          if [ "$DIFF_STATUS" -gt 1 ]; then
+            echo "MCP diff could not produce a comparison report; inspect the CLI error above." >> "$GITHUB_STEP_SUMMARY"
+            exit "$DIFF_STATUS"
+          fi
+          mcptracer assert "$CANDIDATE_SESSION_ID" --db "$DB_PATH" --golden "$BASELINE_SESSION_ID"
+          ASSERT_STATUS=$?
+          set -e
+
+          # Keep the job summary useful without printing request/response data.
+          python3 - "$DIFF_REPORT" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+          report_path, summary_path = sys.argv[1:]
+          with open(report_path, encoding="utf-8") as report_file:
+              report = json.load(report_file)
+          counts = {key: len(report.get(key, [])) for key in ("changed", "added", "removed", "security")}
+          with open(summary_path, "a", encoding="utf-8") as summary:
+              summary.write("## MCP regression gate\n\n")
+              summary.write("| Changed | Added | Removed | Security findings |\n| ---: | ---: | ---: | ---: |\n")
+              summary.write("| {changed} | {added} | {removed} | {security} |\n".format(**counts))
+          PY
+
+          if [ "$DIFF_STATUS" -ne 0 ]; then exit "$DIFF_STATUS"; fi
+          if [ "$ASSERT_STATUS" -ne 0 ]; then exit "$ASSERT_STATUS"; fi

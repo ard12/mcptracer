@@ -366,6 +366,13 @@ fn extract_exchange_facts(input: ExtractionInput<'_>, out: &mut MemoryExtraction
                 "session_has_unanswered_request",
                 "unanswered_request",
             ),
+            ExchangeStatus::Cancelled => push_exchange_status_fact(
+                input,
+                out,
+                exchange,
+                "session_had_cancelled_request",
+                "cancelled_request",
+            ),
             ExchangeStatus::Ok | ExchangeStatus::Subscribed => {}
         }
     }
@@ -540,6 +547,7 @@ fn status_name(status: ExchangeStatus) -> &'static str {
         ExchangeStatus::Error => "error",
         ExchangeStatus::ToolError => "tool_error",
         ExchangeStatus::Unanswered => "unanswered",
+        ExchangeStatus::Cancelled => "cancelled",
         ExchangeStatus::OrphanResponse => "orphan_response",
     }
 }

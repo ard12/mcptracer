@@ -1,10 +1,14 @@
 # Changelog
 
-## 0.3.0-rc1 — public prerelease
+## Unreleased source candidate (package version 0.3.0-rc1)
 
-This generated tree is a pre-1.0 candidate. Prebuilt binaries for it are
-published as the `v0.3.0-rc1` GitHub prerelease; packages, a Homebrew tap, npm/PyPI
-wrappers, and a released GitHub Action still do not exist.
+This generated tree is a pre-1.0 candidate. Existing `v0.3.0-rc1` binary
+archives predate these source changes; no corresponding new binary release
+has been published. The RC1 Linux x86_64 archive requires GLIBC_2.39 and fails
+on Ubuntu 22.04 / glibc 2.35. A corrected prerelease is pending. Packages, a
+Homebrew tap and npm/PyPI registry releases remain unpublished. The existing
+RC1 tag contains an install action; no new action tag has been released for
+this source candidate.
 Its authoritative source revision is recorded in
 `OSS_EXPORT_MANIFEST.json`.
 
@@ -29,6 +33,26 @@ Its authoritative source revision is recorded in
 
 ### Reliability fixes in this candidate
 
+- rustls is patched to 0.23.45 for
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html).
+  The existing RC1 archives do not receive this source-only correction.
+- Inspector export reuses CLI redaction/consent and sensitive-content checks;
+  inspector comparisons reject unhealthy captures.
+- Setup undo restores original JSONC bytes, checks for intervening edits, and
+  retains recovery files after failure. Explicit setup database selection is
+  propagated into generated wrappers.
+- Baseline promotion rejects incomplete captures. Artifact writes publish
+  complete bytes without replacing an existing file.
+- Stdio cancellation has an explicit terminal status and bounded replay;
+  HTTP cancellation persistence/replay remains unsupported.
+- `diff --json` and `assert --golden --json` now emit `schema_version: 4`,
+  adding the `cancelled` status. Published v3 schemas remain unchanged.
+- Optional `diff --explain-schema` adds bounded advisory explanations with a
+  separate v1 envelope; it does not change comparison or approval policy.
+- Linux packaging and its non-publishing rehearsal use a checked glibc 2.35
+  ceiling, inspected on both built and extracted ELF files.
+- Python CI uses explicit discovery to avoid unrelated `tests` packages.
+
 - `record` no longer hangs when the MCP server it wraps exits. Its two
   forwarding pumps and a `Ctrl-C` handler now race, so whichever finishes first
   stops the others; the process also no longer waits on an uncancellable
@@ -47,6 +71,11 @@ Its authoritative source revision is recorded in
   locked: startup gives up after about 5 seconds with a clear error. A lock
   taken mid-session never stalls forwarding; the lost write is reported with a
   non-zero exit.
+- `index`, `route`, `optimize` and `graph` are now an opt-in build (`--features
+  labs`) instead of part of the default binary, so the default surface is the
+  core record/replay/diff/assert workflow. `semantic` includes `labs`.
+- `scripts/install.sh` now installs the published `aarch64-unknown-linux-gnu`
+  binary on 64-bit ARM Linux instead of refusing that architecture.
 - Large stdio messages are relayed in linear time; relaying one near the 8 MiB
   cap previously took tens of seconds. The cap itself is now exact rather than
   admitting frames up to 4 KiB over it.
@@ -79,7 +108,7 @@ Its authoritative source revision is recorded in
 - One coordinated JSON revision: `ExchangeStatus` and `Direction` now use the
   same encodings as the rest of the API (`snake_case`, and `c2s`/`s2c`), and
   every versioned JSON document carries a `schema_version` so a consumer can
-  tell which contract it received. Published as `diff-report.v3`,
+  tell which contract it received. The current candidate uses `diff-report.v4`,
   `session-integrity-report.v2`, `assert-results.v2`, `eval-report.v2`,
   `bench-report.v2`, and `quota-report.v2`. Older schema files remain published
   so an archived report still validates against the version it was produced
@@ -96,7 +125,7 @@ version; the retained schema file alone is not enough.
 
 | Command | Was | Now | What to change |
 | --- | --- | --- | --- |
-| `diff --json`, `assert --golden --json` | `diff-report.v2` | `diff-report.v3` | Accept `schema_version: 3`. Map `status`/`from`/`to` values `"Ok"`, `"Error"`, `"ToolError"`, `"Subscribed"`, `"Unanswered"`, `"OrphanResponse"` to `"ok"`, `"error"`, `"tool_error"`, `"subscribed"`, `"unanswered"`, `"orphan_response"`. |
+| `diff --json`, `assert --golden --json` | `diff-report.v2` / `.v3` | `diff-report.v4` | Accept `schema_version: 4` and the explicit `"cancelled"` status. v2 PascalCase status values changed to snake_case in v3. |
 | `validate --json` | `session-integrity-report.v1` | `.v2` | Accept `schema_version: 2`; an exact-equality check must include it. |
 | `assert --spec --json` | `assert-results.v1` (bare array) | `.v2` (object) | Read `payload["results"]` instead of indexing the top-level value. |
 | `eval --json` | `eval-report.v1` | `.v2` | Accept `schema_version: 2`. |
@@ -110,12 +139,13 @@ on it rather than sniffing the document's contents.
 
 ### Known boundaries
 
-- Compatibility evidence covers Linux, macOS, and Windows for this snapshot's
-  source revision, but only the SDK cells enumerated in
-  `tests/compat/matrix.toml` — the Python stdio cell is non-blocking because of
-  a disclosed SDK-side flake, and no cell exercises a 2026-07-28-era SDK.
-- Modern TypeScript/Python/Go/C# SDK coverage, progress alongside MRTR, cache
-  evidence semantics, and extension negotiation remain incomplete.
+- Compatibility is bounded to the SDK cells enumerated in
+  `tests/compat/matrix.toml`. The legacy Python stdio cell is non-blocking
+  because of a disclosed SDK-side flake. Public exact-revision hosted proof
+  remains pending until the source is promoted and its public CI passes.
+- Modern TypeScript/Python/Go stdio and stateless HTTP cells are included;
+  full current-protocol conformance, C# SDK coverage, progress alongside MRTR,
+  cache evidence semantics and extension negotiation remain incomplete.
 - Recorded tool drift proves change, not malicious intent. Replay proves server
   behavior for captured requests, not that an LLM will make the same choices.
 - Evidence manifests are digest-verifiable but unsigned.

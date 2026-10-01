@@ -9,7 +9,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build -q --bin mcptracer
+# All features: the Labs commands (index, route, optimize, graph, semantic) are
+# opt-in builds, and this reference documents every command.
+cargo build -q --bin mcptracer --all-features
 BIN="target/debug/mcptracer"
 [ -x "$BIN" ] || BIN="target/debug/mcptracer.exe"
 [ -x "$BIN" ] || {

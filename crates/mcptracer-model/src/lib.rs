@@ -46,6 +46,9 @@ pub enum ExchangeStatus {
     /// A long-lived `subscriptions/listen` request whose stream sent the
     /// required acknowledgment notification. It has no terminal response yet.
     Subscribed,
+    /// Request explicitly cancelled by its originator with
+    /// `notifications/cancelled`; no response is expected.
+    Cancelled,
     /// Request had no matching response in the session (pending at end, server
     /// crash, or a dropped record).
     Unanswered,
@@ -104,6 +107,7 @@ pub struct SessionStats {
     pub ok: usize,
     pub errors: usize,
     pub unanswered: usize,
+    pub cancelled: usize,
     pub orphan_responses: usize,
     pub notifications: usize,
     pub latency_p50_ns: Option<i64>,
@@ -143,7 +147,7 @@ pub struct SessionIntegrityIssue {
 ///
 /// A report is healthy only when the capture has at least one message, no
 /// known recording loss, valid stored JSON, recognized protocol metadata, and
-/// no unmatched request/response pairs. This is deliberately stricter than a
+/// no unanswered requests other than those explicitly cancelled. This is deliberately stricter than a
 /// descriptive session view: callers that act as CI gates must fail closed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SessionIntegrityReport {
@@ -242,6 +246,22 @@ pub fn correlate(messages: &[StoredMessage]) -> SessionModel {
                 }
             }
             "notification" => {
+                if msg.method.as_deref() == Some("notifications/cancelled") {
+                    let cancelled_id = serde_json::from_str::<serde_json::Value>(&msg.payload)
+                        .ok()
+                        .and_then(|payload| payload.pointer("/params/requestId").cloned())
+                        .and_then(|id| match id {
+                            serde_json::Value::String(_) | serde_json::Value::Number(_) => {
+                                serde_json::to_string(&id).ok()
+                            }
+                            _ => None,
+                        });
+                    if let Some(id) = cancelled_id {
+                        if let Some(idx) = pending.remove(&(dir.opposite(), id)) {
+                            exchanges[idx].status = ExchangeStatus::Cancelled;
+                        }
+                    }
+                }
                 if dir == Direction::ServerToClient
                     && msg.method.as_deref() == Some("notifications/subscriptions/acknowledged")
                 {
@@ -375,7 +395,8 @@ pub fn validate_session(
             ExchangeStatus::Ok
             | ExchangeStatus::Error
             | ExchangeStatus::ToolError
-            | ExchangeStatus::Subscribed => continue,
+            | ExchangeStatus::Subscribed
+            | ExchangeStatus::Cancelled => continue,
         };
         report
             .issues
@@ -399,6 +420,7 @@ fn compute_stats(exchanges: &[Exchange], notifications: &[NotificationEvent]) ->
         match e.status {
             ExchangeStatus::Ok | ExchangeStatus::Subscribed => stats.ok += 1,
             ExchangeStatus::Error | ExchangeStatus::ToolError => stats.errors += 1,
+            ExchangeStatus::Cancelled => stats.cancelled += 1,
             ExchangeStatus::Unanswered => stats.unanswered += 1,
             ExchangeStatus::OrphanResponse => stats.orphan_responses += 1,
         }
@@ -486,6 +508,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ExchangeStatus::Subscribed).unwrap(),
             serde_json::json!("subscribed")
+        );
+        assert_eq!(
+            serde_json::to_value(ExchangeStatus::Cancelled).unwrap(),
+            serde_json::json!("cancelled")
         );
         assert_eq!(
             serde_json::to_value(ExchangeStatus::Unanswered).unwrap(),
@@ -724,6 +750,43 @@ mod tests {
     }
 
     // 5
+    #[test]
+    fn cancelled_request_is_a_valid_terminal_exchange() {
+        let mut cancel = m(
+            1,
+            125,
+            "c2s",
+            "notification",
+            None,
+            Some("notifications/cancelled"),
+            None,
+            false,
+            None,
+        );
+        cancel.payload = r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1,"reason":"superseded"}}"#.to_string();
+        let msgs = [
+            m(
+                0,
+                100,
+                "c2s",
+                "request",
+                Some("1"),
+                Some("tools/call"),
+                Some("search"),
+                false,
+                None,
+            ),
+            cancel,
+        ];
+
+        let model = correlate(&msgs);
+        assert_eq!(model.exchanges[0].status, ExchangeStatus::Cancelled);
+        assert_eq!(model.stats.cancelled, 1);
+        assert_eq!(model.stats.unanswered, 0);
+        assert!(validate_session(&msgs, 0).is_healthy());
+    }
+
+    // 6
     #[test]
     fn unanswered_request() {
         let msgs = [m(

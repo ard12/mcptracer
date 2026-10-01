@@ -75,6 +75,15 @@ function findBinary() {
   return null;
 }
 
+// On Windows a bare `tar.exe` resolves through PATH, and under Git Bash that
+// is GNU tar, which reads `C:\...` as a remote `host:path` and fails ("Cannot
+// connect to C"). The system bsdtar handles both drive letters and .zip.
+function windowsTar() {
+  const systemRoot = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const systemTar = path.join(systemRoot, 'System32', 'tar.exe');
+  return fs.existsSync(systemTar) ? systemTar : 'tar.exe';
+}
+
 // Verifies `filePath` against the `<hash>  <filename>` line for
 // `archiveName` in the release's SHA256SUMS.txt. Throws on any mismatch or
 // missing entry -- there is no "proceed anyway" path.
@@ -134,7 +143,7 @@ function ensureBinary() {
     verifyChecksum(cacheDir, archiveName, archivePath);
 
     if (process.platform === 'win32') {
-      execFileSync('tar.exe', ['-xf', archivePath, '-C', cacheDir], { stdio: 'inherit' });
+      execFileSync(windowsTar(), ['-xf', archivePath, '-C', cacheDir], { stdio: 'inherit' });
     } else {
       execFileSync('tar', ['-xzf', archivePath, '-C', cacheDir], { stdio: 'inherit' });
       fs.chmodSync(targetBin, 0o755);

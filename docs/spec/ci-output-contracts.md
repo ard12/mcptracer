@@ -23,7 +23,8 @@ Six JSON Schema (draft 2020-12) documents, one per distinct output shape:
 | File | Emitted by |
 |---|---|
 | `session-integrity-report.v2.schema.json` | `validate --json` |
-| `diff-report.v3.schema.json` | `diff --json`, and `assert --golden --json` (same `DiffReport` type) |
+| `diff-report.v4.schema.json` | `diff --json`, and `assert --golden --json` (same `DiffReport` type; adds stdio `cancelled` status) |
+| `schema-explanation-report.v1.schema.json` | `diff --explain-schema --json` (opt-in envelope; validate nested `diff_report` against v4) |
 | `assert-results.v2.schema.json` | `assert --spec --json` (an object, `{"schema_version": 2, "results": [...]}`; v1 was a bare JSON array) |
 | `eval-report.v2.schema.json` | `eval --json` |
 | `bench-report.v2.schema.json` | `bench --json` |
@@ -79,7 +80,7 @@ inconsistencies, previously documented here rather than silently
 "corrected" in the schema (which would have made the schema wrong). Both
 are now fixed: `ExchangeStatus` carries `#[serde(rename_all = "snake_case")]`
 like every other enum here (`"ok"`, `"error"`, `"tool_error"`,
-`"subscribed"`, `"unanswered"`, `"orphan_response"`), and `Direction`
+`"subscribed"`, `"cancelled"`, `"unanswered"`, `"orphan_response"`), and `Direction`
 serializes as `"c2s"`/`"s2c"` — the encoding it already used everywhere
 else, not `"client_to_server"`. `diff-report`'s schema bumped to v3 to
 carry both the `ExchangeStatus` fix and `schema_version` in one breaking

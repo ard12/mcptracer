@@ -46,6 +46,7 @@ Wrap the stdio MCP servers already configured for a supported client:
 
 ```bash
 mcptracer setup claude-desktop
+mcptracer setup claude-code
 mcptracer setup cursor
 mcptracer setup codex
 mcptracer setup vscode
@@ -54,7 +55,10 @@ mcptracer setup vscode
 Each command validates the existing configuration before writing, saves an
 adjacent `.mcptracer.bak` backup, and replaces only stdio `command`/`args`
 entries with `mcptracer record --client <client> -- ...`. HTTP and SSE servers
-are left unchanged.
+are left unchanged. For Claude Code, run `setup claude-code` from the project
+root: it edits that project's `.mcp.json` (`mcpServers` key). Claude Code asks
+you to approve project-scoped servers before connecting; review the entry in
+Claude Code's MCP panel after setup. See the [Claude Code MCP guide](https://code.claude.com/docs/en/mcp#project-server-approvals-and-workspace-trust).
 
 The `command` written is the **absolute path** of the running `mcptracer`
 binary, not the bare name. Desktop MCP clients are launched by the OS with a
@@ -73,6 +77,13 @@ mcptracer setup codex --undo
 mcptracer setup --undo
 ```
 
+To keep recordings in an explicit database, pass the global option before
+`setup`. The selected absolute path is written into each generated `record`
+command so the launched client uses it too:
+
+```bash
+mcptracer --db /path/to/sessions.db setup vscode
+```
 The final command restores every supported default configuration with an
 MCPTracer backup. Setup refuses malformed configurations, invalid command
 arguments, and an existing backup rather than risk losing the original file.
@@ -377,8 +388,10 @@ values are retained because their original secret values may have differed.
 
 ## Route
 
-*Labs feature: derived and advisory, outside the protocol hot path. Does not
-define the core evidence workflow.*
+*Labs feature — an opt-in build (`--features labs`, see
+[Installation](../docs-site/src/installation.md#labs-commands-opt-in-build)): derived and
+advisory, outside the protocol hot path. Does not define the core evidence
+workflow.*
 
 Get reasoned next-step recommendations for a session, derived from the memory
 index (`mcptracer index rebuild`), the integrity report, and correlated stats
@@ -407,7 +420,8 @@ A session with none of the above prints a plain "looks healthy" message.
 
 ## Optimize
 
-*Labs feature: derived and advisory, outside the protocol hot path.*
+*Labs feature — an opt-in build (`--features labs`): derived and advisory,
+outside the protocol hot path.*
 
 Mine every recorded session for config worth adopting — never mutates files
 or calls a model:
@@ -431,7 +445,8 @@ mcptracer optimize --json    # includes confidence and provenance
 
 ## Graph
 
-*Labs feature: derived and advisory, outside the protocol hot path.*
+*Labs feature — an opt-in build (`--features labs`): derived and advisory,
+outside the protocol hot path.*
 
 Export the derived index — sessions, tools, tool versions, and how they
 relate — as JSONL or DOT:
@@ -451,7 +466,8 @@ kept when both its endpoints survive. Full schema:
 
 ## Semantic Search (experimental, opt-in build)
 
-*Labs feature: derived and advisory, outside the protocol hot path.*
+*Labs feature — an opt-in build (`--features labs`): derived and advisory,
+outside the protocol hot path.*
 
 Local lexical search over the derived index — **not** a neural embedding
 model; no weights are bundled or downloaded and nothing calls out over the

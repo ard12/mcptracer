@@ -1,0 +1,19 @@
+{
+  "name": "mcptracer-ts-sdk-cancellation",
+  "version": "1.0.0",
+  "description": "Focused MCPTracer cancellation smoke using TypeScript SDK v2.2.0",
+  "main": "main.js",
+  "scripts": {
+    "smoke": "node main.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.2.0",
+    "@modelcontextprotocol/server": "2.2.0",
+    "zod": "4.2.0"
+  },
+  "private": true
+}

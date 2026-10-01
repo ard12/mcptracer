@@ -42,10 +42,10 @@ on every command, see the full [CLI reference](cli.md).
 - `mcptracer import` -- Import a local `.mtrace` artifact without executing its contents
 - `mcptracer inspect` -- Read-only local web UI over recorded sessions (session list + timeline)
 
-## Derive -- mine recorded history for insight (Labs)
+## Derive -- mine recorded history for insight (Labs, opt-in build)
 
-- `mcptracer index` -- Rebuild or inspect the derived memory index over recorded sessions *(Labs: derived, outside the protocol hot path)*
-- `mcptracer route` -- Recommend next commands for a session from the derived index and stats *(Labs: derived, outside the protocol hot path)*
-- `mcptracer optimize` -- Mine recorded history for latency/assertion/bench suggestions *(Labs: derived, outside the protocol hot path)*
-- `mcptracer graph` -- Export the temporal tool memory graph as JSONL or DOT *(Labs: derived, outside the protocol hot path)*
+- `mcptracer index` -- Rebuild or inspect the derived memory index over recorded sessions (Labs; requires the `labs` feature)
+- `mcptracer route` -- Recommend next commands for a session from the derived index and stats (Labs; requires the `labs` feature)
+- `mcptracer optimize` -- Mine recorded history for latency/assertion/bench suggestions (Labs; requires the `labs` feature)
+- `mcptracer graph` -- Export the temporal tool memory graph as JSONL or DOT (Labs; requires the `labs` feature)
 - `mcptracer semantic` -- Experimental local lexical search over the derived index (off by default at build time; requires the `semantic-search` feature) *(Labs)*

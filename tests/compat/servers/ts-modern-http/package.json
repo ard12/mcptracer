@@ -1,0 +1,13 @@
+{
+  "name": "mcptracer-compat-ts-modern-http",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Real MCP TypeScript SDK v2 stateless HTTP server for MCPTracer's 2026-07-28 compatibility lane.",
+  "type": "module",
+  "main": "server.js",
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.1.0",
+    "@modelcontextprotocol/server": "2.2.0",
+    "zod": "4.2.0"
+  }
+}

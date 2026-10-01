@@ -44,12 +44,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Keep the GNU/Linux runtime floor at Ubuntu 22.04 / glibc 2.35.
+          # Building on ubuntu-latest silently raised it to glibc 2.39, which
+          # made the published x86_64 archive unusable on Ubuntu 22.04.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
           # Native ARM64 runner (not cross-compilation) so the Smoke-test
-          # step below can actually execute the built binary.
-          - os: ubuntu-24.04-arm
+          # step below can actually execute the built binary. Keep it on the
+          # same Ubuntu/glibc floor as x86_64.
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
           # Intel runner on purpose. `macos-latest` is Apple Silicon, so
@@ -75,6 +79,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
 
       # Tag v2 -> e18b497796c12c097a38f9edb9d0641fb99eee32 (2026-03-12).
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
@@ -127,6 +135,14 @@ jobs:
           fi
           echo "Smoke test passed: $ver_output"
 
+      - name: Check Linux glibc symbol floor
+        if: contains(matrix.target, 'linux-gnu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}"
+          python scripts/check_glibc_compat.py "$bin" --max-glibc 2.35
+
       - name: Package (unix)
         if: matrix.archive_ext == 'tar.gz'
         shell: bash
@@ -165,6 +181,14 @@ jobs:
           & "package-smoke\\$staging\\${{ env.BIN_NAME }}.exe" --version
           Add-Content -Path $env:GITHUB_ENV -Value "ASSET=$staging.zip"
           Add-Content -Path $env:GITHUB_ENV -Value "CHECKSUM=$staging.zip.sha256"
+
+      - name: Check packaged Linux glibc requirements
+        if: contains(matrix.target, 'linux-gnu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="package-smoke/${{ env.BIN_NAME }}-${{ github.ref_name }}-${{ matrix.target }}/${{ env.BIN_NAME }}"
+          python scripts/check_glibc_compat.py "$bin" --max-glibc 2.35
 
       - name: Attest build provenance
         # Was non-fatal while the repository was private, because

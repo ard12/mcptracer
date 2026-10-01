@@ -5,7 +5,7 @@ inputs:
   version:
     description: Release tag to install, for example v0.3.0. `latest` is accepted but pinning a specific tag is recommended.
     required: false
-    default: v0.2.0
+    default: v0.3.0-rc1
   repository:
     description: GitHub repository that publishes mcptracer release assets.
     required: false
@@ -74,10 +74,23 @@ runs:
             "$PYTHON" - "$api_url" <<'PY'
         import json
         import sys
+        import urllib.error
         import urllib.request
 
-        with urllib.request.urlopen(sys.argv[1]) as response:
-            print(json.load(response)["tag_name"])
+        url = sys.argv[1]
+        try:
+            with urllib.request.urlopen(url) as response:
+                print(json.load(response)["tag_name"])
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                # /releases/latest excludes prereleases; fall back to the first release in /releases
+                list_url = url.rsplit("/", 1)[0]
+                with urllib.request.urlopen(list_url) as response:
+                    releases = json.load(response)
+                    if releases:
+                        print(releases[0]["tag_name"])
+                        sys.exit(0)
+            raise
         PY
           )"
         fi

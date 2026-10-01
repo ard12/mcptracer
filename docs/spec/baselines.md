@@ -118,6 +118,9 @@ golden conformance test, and the three CI-format adapters.
   candidate registration, promotion (with digest/actor/reason recorded and
   visible via `--json`), the exact `assert --golden "$(baseline resolve
   ...)"` composition pattern this feature exists for (proving both a
-  matching and a differing session behave correctly through it), promoting
-  a second candidate supersedes the first, and revocation clears
+  matching and a differing session behave correctly through it), refusing
+  cross-project/scenario promotion without replacing the current approval,
+  requiring a separate candidate registration for the exact scope, and binding
+  the replacement approval's digest, actor, and reason to that changed session.
+  Promoting a second candidate supersedes the first, and revocation clears
   resolution.

@@ -2,31 +2,16 @@
 
 Zero-install CLI wrapper for **[MCPTracer](https://github.com/ard12/mcptracer)** — the executable evidence and release-assurance layer for the Model Context Protocol (MCP).
 
-## Quick Start with `npx` (No Rust Required)
+## Current Install Path
 
-Run MCPTracer directly on any system with Node.js installed:
+This repository contains a local npm package candidate, but `mcptracer` is not
+published to npm. Registry-based `npx` and `npm install` commands are not
+available. Install the published `v0.3.0-rc1` binary preview with the explicit
+version pin in the main [installation guide](https://github.com/ard12/mcptracer/blob/main/docs-site/src/installation.md).
 
-```bash
-# Record an MCP session (prints the new session id)
-npx mcptracer record --client claude -- npx -y @modelcontextprotocol/server-everything
-
-# Run an offline stdio mock server from a recorded session
-npx mcptracer serve <session-id>
-
-# Diff two recorded sessions or check for tool contract rug-pulls
-npx mcptracer diff <baseline-session-id> <candidate-session-id>
-
-# Pin tool contract hashes in CI
-npx mcptracer assert <session-id> --spec pin.toml
-```
-
-## Global Installation
-
-```bash
-npm install -g mcptracer
-mcptracer --version
-```
+This README will describe the npm wrapper's usage after an authorized package
+publication is completed.
 
 ## How It Works
 
-This package resolves your OS and architecture (`win32-x64`, `darwin-arm64`, `darwin-x64`, `linux-x64`), locates the high-performance native Rust binary, and executes it with zero runtime overhead.
+This package resolves your OS and architecture (`win32-x64`, `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`), locates the high-performance native Rust binary, and executes it with zero runtime overhead.

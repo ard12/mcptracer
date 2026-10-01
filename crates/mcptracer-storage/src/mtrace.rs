@@ -7,6 +7,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
@@ -172,22 +173,76 @@ pub fn read_file(path: impl AsRef<Path>, strict: bool) -> Result<MtraceDocument>
 /// after creation — before any bytes are written, so a concurrent reader racing
 /// to open the file still cannot read a partially-written secret.
 pub fn write_file(path: impl AsRef<Path>, bytes: &[u8]) -> Result<()> {
-    let path = path.as_ref();
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
-    // T-61: restrict the artifact to owner-only access before writing any
-    // potentially sensitive bytes. On non-Unix platforms this is a no-op;
-    // the file inherits the parent directory's ACL (which we never broaden).
+    write_file_with(path.as_ref(), bytes, |file, contents| {
+        file.write_all(contents)
+    })
+}
+
+fn write_file_with<F>(path: &Path, bytes: &[u8], write: F) -> Result<()>
+where
+    F: FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+{
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("mtrace"));
+    let (temp_path, mut file) = (0..32)
+        .find_map(|_| {
+            let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let mut temp_name = std::ffi::OsString::from(".");
+            temp_name.push(name);
+            temp_name.push(format!(
+                ".mcptracer-export-{}-{sequence}.tmp",
+                std::process::id()
+            ));
+            let candidate = parent.join(temp_name);
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => Some(Ok((candidate, file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .transpose()
+        .context("could not allocate a temporary artifact file")?
+        .ok_or_else(|| anyhow::anyhow!("could not allocate a unique temporary artifact file"))?;
+
+    // Set Unix confidentiality before writing any artifact bytes. The final
+    // path is published only after the complete temporary file is flushed.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+            drop(file);
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error).with_context(|| {
+                format!("failed to secure temporary artifact for {}", path.display())
+            });
+        }
     }
-    file.write_all(bytes)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+
+    if let Err(error) = write(&mut file, bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error).with_context(|| format!("failed to write {}", path.display()));
+    }
+    drop(file);
+
+    // A same-directory hard link publishes the complete bytes atomically and
+    // fails if the destination already exists. Unlike rename, it cannot
+    // replace a previously-good artifact during a race.
+    if let Err(error) = std::fs::hard_link(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error).with_context(|| format!("failed to create {}", path.display()));
+    }
+    let _ = std::fs::remove_file(&temp_path);
     Ok(())
 }
 
@@ -308,13 +363,17 @@ pub fn lint_sensitive_content(document: &MtraceDocument) -> Vec<SensitiveContent
 }
 
 pub fn canonical_digest(document: &MtraceDocument) -> String {
+    sha256_hex(canonical_identity_bytes(document).as_bytes())
+}
+
+fn canonical_identity_bytes(document: &MtraceDocument) -> String {
     let identity = serde_json::json!({
         "format": document.format,
         "version": document.version,
         "session": document.session,
         "messages": document.messages,
     });
-    sha256_hex(identity.to_string().as_bytes())
+    identity.to_string()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -574,6 +633,44 @@ mod tests {
             .contains("unknown top-level mtrace field"));
     }
 
+    #[test]
+    fn failed_artifact_write_removes_partial_temporary_and_publishes_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "mcptracer-mtrace-failure-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.mtrace");
+        let error = write_file_with(&path, b"complete artifact", |file, _| {
+            file.write_all(b"partial")?;
+            Err(std::io::Error::other("injected storage exhaustion"))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("failed to write"));
+        assert!(!path.exists(), "a partial artifact must never be published");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn artifact_write_does_not_replace_an_existing_good_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "mcptracer-mtrace-existing-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.mtrace");
+        std::fs::write(&path, b"known-good artifact").unwrap();
+
+        assert!(write_file(&path, b"replacement").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"known-good artifact");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn write_file_sets_owner_only_permissions() {
@@ -692,6 +789,38 @@ mod tests {
     }
 
     // ── lint_sensitive_content tests ─────────────────────────────────────
+
+    #[test]
+    fn artifact_identity_matches_independent_golden_vector() {
+        let doc = document();
+        let canonical = canonical_identity_bytes(&doc);
+        let expected = include_str!("../../../tests/golden/artifact-identity.canonical.json");
+        assert_eq!(canonical, expected.trim_end());
+        assert_eq!(
+            canonical_digest(&doc),
+            include_str!("../../../tests/golden/artifact-identity.sha256").trim()
+        );
+    }
+
+    #[test]
+    fn decode_rejects_non_json_numeric_constants() {
+        let invalid = br#"{"format":"mtrace","version":1,"exported_at_ns":0,"exporter":"test","session":{"client":"test","server_command":"server","transport":"stdio","started_at_ns":0,"ended_at_ns":null,"redaction_policy":"default","redaction_keys":[],"dropped_messages":0,"tags":[]},"messages":[{"seq":0,"ts_ns":0,"direction":"c2s","message_kind":"request","rpc_id":"1","method":"tools/call","tool_name":"echo","payload":{"id":NaN},"payload_bytes":1,"is_error":false,"error_code":null}]}"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(invalid).unwrap();
+        let bytes = encoder.finish().unwrap();
+        let error = decode(&bytes, false).unwrap_err().to_string();
+        assert!(error.contains("not valid JSON"), "{error}");
+    }
+
+    #[test]
+    fn artifact_identity_excludes_export_metadata_and_round_trips() {
+        let original = document();
+        let mut reexported = original.clone();
+        reexported.exported_at_ns = i64::MAX;
+        reexported.exporter = "a different exporter".to_string();
+        let imported = decode(&encode(&reexported).unwrap(), true).unwrap();
+        assert_eq!(canonical_digest(&original), canonical_digest(&imported));
+    }
 
     #[test]
     fn lint_sensitive_content_is_empty_for_a_clean_document() {
