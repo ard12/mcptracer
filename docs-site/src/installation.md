@@ -1,34 +1,36 @@
 # Installation
 
-This is a pre-1.0 source candidate. Its changes are not included in the existing
-`v0.3.0-rc1` binary archives. Build this revision from source to use these fixes.
-The older RC1 Linux x86_64 archive requires GLIBC_2.39 and cannot run on Ubuntu
-22.04 / glibc 2.35. A corrected binary prerelease remains pending.
+This tree targets `v0.3.0-rc2 | Developer Preview Beta`, a prerelease, not stable.
+RC2 supersedes the older RC1 Linux compatibility limitation: RC1 requires
+GLIBC_2.39, while RC2 packaging enforces Ubuntu 22.04 / glibc 2.35 compatibility.
+RC1 and its tag remain unchanged. Until RC2 assets are available on the
+[release page](https://github.com/ard12/mcptracer/releases/tag/v0.3.0-rc2),
+build this revision from source.
 No package-manager install exists yet: npm, PyPI, crates.io and Homebrew remain
-unpublished. The existing RC1 tag contains an install action; no new action tag
-has been released for this source candidate.
+unpublished. The existing RC1 tag contains an install action; use an exact
+reviewed source revision or the RC2 tag once published for corrected behavior.
 
-## Install the older prebuilt preview
+## Install the RC2 prebuilt preview
 
 Pin the version explicitly; a mutable Latest badge does not identify source.
-These commands install the older RC1 and do not provide this candidate's fixes.
+These commands require the RC2 release assets to have been published.
 On macOS and Linux the variable must sit to the **right** of
 the pipe, attached to `bash`; on the left it would be set for `curl` instead and
 the installer would never see it.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ard12/mcptracer/main/scripts/install.sh | MCPTRACER_VERSION=v0.3.0-rc1 bash
+curl -fsSL https://raw.githubusercontent.com/ard12/mcptracer/main/scripts/install.sh | MCPTRACER_VERSION=v0.3.0-rc2 bash
 ```
 
 ```powershell
-$env:MCPTRACER_VERSION = "v0.3.0-rc1"; irm https://raw.githubusercontent.com/ard12/mcptracer/main/scripts/install.ps1 | iex
+$env:MCPTRACER_VERSION = "v0.3.0-rc2"; irm https://raw.githubusercontent.com/ard12/mcptracer/main/scripts/install.ps1 | iex
 ```
 
 Both installers verify the archive's SHA-256 before extracting and confirm the
 installed binary actually runs. To check build provenance yourself:
 
 ```bash
-gh attestation verify mcptracer-v0.3.0-rc1-<target>.tar.gz --owner ard12
+gh attestation verify mcptracer-v0.3.0-rc2-<target>.tar.gz --repo ard12/mcptracer
 ```
 
 ## Build from source
@@ -81,7 +83,7 @@ installed binary for version/help checks and the complete rug-pull tutorial.
 
 ## Platform evidence
 
-Publicly accessible hosted test, MSRV, and real-SDK results are pending/unverified for source revision `63c82701aaedb5907885580c5f5a819116846176`. Windows-local checks do not establish Linux or macOS success.
+Publicly accessible hosted test, MSRV, and real-SDK results are pending/unverified for source revision `6ef066e06e251bd6806f4cd51e797d58fd9ff61c`. Windows-local checks do not establish Linux or macOS success.
 
 Check the Actions tab for the exact commit you intend to use; that is the only
 evidence that applies to it. Building requires Rust 1.85+ and a working C

@@ -8,11 +8,11 @@ import sys
 from pathlib import Path
 
 # The upstream Rust binary's release tag (matches Cargo.toml / the git tag,
-# e.g. "v0.3.0-rc1"), NOT this package's own PyPI version. Deliberately not
+# e.g. "v0.3.0-rc2"), NOT this package's own PyPI version. Deliberately not
 # derived from importlib.metadata: setuptools normalizes PEP 440 pre-release
-# identifiers (pyproject.toml's "0.3.0-rc1" installs as "0.3.0rc1", hyphen
+# identifiers (pyproject.toml's "0.3.0-rc2" installs as "0.3.0rc2", hyphen
 # stripped), which would silently break the release download URL below.
-VERSION = "0.3.0-rc1"
+VERSION = "0.3.0-rc2"
 REPO = "ard12/mcptracer"
 
 

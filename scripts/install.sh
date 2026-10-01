@@ -67,7 +67,7 @@ sha256_of() {
 
 TARGET="$(detect_target)"
 
-NO_STABLE_RELEASE_MSG="no stable version tag is available for automatic installation. This installer requires an explicit version for preview tags -- install it explicitly: MCPTRACER_VERSION=v0.3.0-rc1 sh install.sh (or: curl -fsSL <install.sh-url> | MCPTRACER_VERSION=v0.3.0-rc1 sh)"
+NO_STABLE_RELEASE_MSG="no stable version tag is available for automatic installation. This installer requires an explicit version for preview tags -- install it explicitly: MCPTRACER_VERSION=v0.3.0-rc2 sh install.sh (or: curl -fsSL <install.sh-url> | MCPTRACER_VERSION=v0.3.0-rc2 sh)"
 
 VERSION="${MCPTRACER_VERSION:-}"
 if [ -z "$VERSION" ]; then

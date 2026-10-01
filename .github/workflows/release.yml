@@ -140,6 +140,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          . /etc/os-release
+          test "$ID:$VERSION_ID" = "ubuntu:22.04"
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.35"
+          echo "Native runtime compatibility floor: Ubuntu $VERSION_ID / $(getconf GNU_LIBC_VERSION)"
           bin="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}"
           python scripts/check_glibc_compat.py "$bin" --max-glibc 2.35
 
@@ -264,6 +268,9 @@ jobs:
             dist/*
           generate_release_notes: true
           draft: false
+          name: ${{ contains(github.ref_name, '-') && format('{0} | Developer Preview Beta', github.ref_name) || github.ref_name }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'legacy' }}
+          body_path: ${{ github.ref_name == 'v0.3.0-rc2' && 'docs/releases/v0.3.0-rc2.md' || '' }}
           # Any semver tag carrying a pre-release identifier (v0.3.0-rc1,
           # -alpha, -beta) is published as a pre-release so it never becomes
           # the "Latest release" a casual visitor downloads. Without this an
