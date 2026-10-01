@@ -1089,7 +1089,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcptracer-intel"
-version = "0.3.0-rc1"
+version = "0.3.0-rc2"
 dependencies = [
  "anyhow",
  "mcptracer-model",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "mcptracer-model"
-version = "0.3.0-rc1"
+version = "0.3.0-rc2"
 dependencies = [
  "mcptracer-protocol",
  "mcptracer-redact",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "mcptracer-protocol"
-version = "0.3.0-rc1"
+version = "0.3.0-rc2"
 dependencies = [
  "anyhow",
  "criterion",
@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "mcptracer-proxy"
-version = "0.3.0-rc1"
+version = "0.3.0-rc2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1156,14 +1156,14 @@ dependencies = [
 
 [[package]]
 name = "mcptracer-redact"
-version = "0.3.0-rc1"
+version = "0.3.0-rc2"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mcptracer-storage"
-version = "0.3.0-rc1"
+version = "0.3.0-rc2"
 dependencies = [
  "anyhow",
  "dirs",

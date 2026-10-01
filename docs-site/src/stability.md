@@ -1,7 +1,7 @@
 # Stability & Compatibility
 
-MCPTracer is pre-1.0. This source export contains a `0.3.0-rc1` release
-candidate, not a newly published public release. This page states
+MCPTracer is pre-1.0. This source export targets `0.3.0-rc2` Developer
+Preview Beta, not stable. Check the release assets separately. This page states
 what's actually stable today versus what can still change, so you can decide
 what to depend on in CI.
 
@@ -61,7 +61,7 @@ breaking change, called out explicitly in the changelog:
 
 ## Platform evidence
 
-Publicly accessible hosted test, MSRV, and real-SDK results are pending/unverified for source revision `63c82701aaedb5907885580c5f5a819116846176`. Windows-local checks do not establish Linux or macOS success.
+Publicly accessible hosted test, MSRV, and real-SDK results are pending/unverified for source revision `6ef066e06e251bd6806f4cd51e797d58fd9ff61c`. Windows-local checks do not establish Linux or macOS success.
 
 Check the Actions tab for the exact source revision; claims in this section are
 emitted only when matching hosted evidence is supplied to the exporter.

@@ -22,7 +22,7 @@ if ([Environment]::Is64BitOperatingSystem -eq $false) {
     throw "mcptracer only publishes 64-bit Windows binaries (x86_64-pc-windows-msvc)."
 }
 
-$NoStableReleaseMsg = "no stable version tag is available for automatic installation. This installer requires an explicit version for preview tags -- install it explicitly: `$env:MCPTRACER_VERSION = 'v0.3.0-rc1'; irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex"
+$NoStableReleaseMsg = "no stable version tag is available for automatic installation. This installer requires an explicit version for preview tags -- install it explicitly: `$env:MCPTRACER_VERSION = 'v0.3.0-rc2'; irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex"
 
 $Version = $env:MCPTRACER_VERSION
 if (-not $Version) {

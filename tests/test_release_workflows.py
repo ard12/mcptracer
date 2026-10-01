@@ -34,6 +34,8 @@ class ReleaseWorkflowContracts(unittest.TestCase):
             self.assertEqual(workflow.count("--max-glibc 2.35"), 2)
             self.assertNotIn("readelf --version-info", workflow)
             self.assertIn("name: Check packaged Linux glibc requirements", workflow)
+            self.assertIn('test "$ID:$VERSION_ID" = "ubuntu:22.04"', workflow)
+            self.assertIn('test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.35"', workflow)
         self.assertIn("package-smoke/", self.release)
         self.assertIn('env.EXTRACTED', self.rehearsal)
 
@@ -49,6 +51,12 @@ class ReleaseWorkflowContracts(unittest.TestCase):
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn('python -m unittest discover -s tests -p "test_*.py" -v', ci)
         self.assertNotIn("python -m unittest tests.", ci)
+
+    def test_preview_release_is_explicitly_not_latest(self):
+        self.assertIn("prerelease: ${{ contains(github.ref_name, '-') }}", self.release)
+        self.assertIn("make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'legacy' }}", self.release)
+        self.assertIn("Developer Preview Beta", self.release)
+        self.assertIn("docs/releases/v0.3.0-rc2.md", self.release)
 
 
 if __name__ == "__main__":

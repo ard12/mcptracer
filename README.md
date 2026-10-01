@@ -19,8 +19,8 @@ regressions fail CI, and keep the recorded evidence locally.
 
 > **Noncommercial source preview · pre-1.0.** Commercial use requires written
 > permission from ard12. See [licensing](COMMERCIAL-LICENSE.md). The published
-> binaries are the `v0.3.0-rc1` preview. GitHub currently has that release's
-> prerelease flag off; install instructions still pin it explicitly. npm and
+> target is `v0.3.0-rc2`, a Developer Preview Beta, not a stable release.
+> Install instructions pin it explicitly. RC1 and its tag remain unchanged. npm and
 > other package-manager installs are not published.
 
 ## Who is this for?
@@ -58,18 +58,18 @@ stored responses without contacting that target.
 
 ## Quick start
 
-Build this checked revision from source for the current fixes. Existing RC1
-archives predate these changes. The Linux x86_64 RC1 archive requires
-GLIBC_2.39 and fails on Ubuntu 22.04 / glibc 2.35; a corrected prerelease is
-pending. The release and rehearsal pipelines now enforce glibc 2.35 on future
-built and extracted Linux binaries.
+RC2 supersedes RC1's Linux compatibility limitation: the RC1 x86_64 archive
+requires GLIBC_2.39 and fails on Ubuntu 22.04 / glibc 2.35. RC2 builds use
+Ubuntu 22.04 and enforce a glibc 2.35 ceiling on built and extracted binaries.
+RC1's archive and tag are preserved. RC2 also includes the rustls security
+update and the source-preview safety fixes. See [RC2 notes](docs/releases/v0.3.0-rc2.md).
 
 **Prebuilt preview: no Rust toolchain needed.** Linux, macOS, and Windows
-binaries are published for the `v0.3.0-rc1` preview. GitHub currently has the
-release's prerelease flag off, so the installer pins the preview tag explicitly:
+binaries are provided through the `v0.3.0-rc2` prerelease assets. Until that
+release is published, build from source. The installer pins the preview explicitly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ard12/mcptracer/main/scripts/install.sh | MCPTRACER_VERSION=v0.3.0-rc1 bash
+curl -fsSL https://raw.githubusercontent.com/ard12/mcptracer/main/scripts/install.sh | MCPTRACER_VERSION=v0.3.0-rc2 bash
 ```
 
 For the Windows PowerShell command and provenance verification, see

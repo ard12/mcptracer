@@ -1,14 +1,13 @@
 # Changelog
 
-## Unreleased source candidate (package version 0.3.0-rc1)
+## 0.3.0-rc2 | Developer Preview Beta
 
-This generated tree is a pre-1.0 candidate. Existing `v0.3.0-rc1` binary
-archives predate these source changes; no corresponding new binary release
-has been published. The RC1 Linux x86_64 archive requires GLIBC_2.39 and fails
-on Ubuntu 22.04 / glibc 2.35. A corrected prerelease is pending. Packages, a
-Homebrew tap and npm/PyPI registry releases remain unpublished. The existing
-RC1 tag contains an install action; no new action tag has been released for
-this source candidate.
+This generated tree targets a pre-1.0 prerelease, not stable/latest.
+RC2 supersedes RC1's Linux GLIBC_2.39 limitation with Ubuntu 22.04 / glibc 2.35
+packaging checks on built and extracted binaries. RC1 archives and tag remain
+unchanged. See [RC2 release notes](docs/releases/v0.3.0-rc2.md); installation
+requires published RC2 assets. Packages, a Homebrew tap and npm/PyPI registry
+releases remain unpublished.
 Its authoritative source revision is recorded in
 `OSS_EXPORT_MANIFEST.json`.
 
@@ -35,7 +34,7 @@ Its authoritative source revision is recorded in
 
 - rustls is patched to 0.23.45 for
   [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html).
-  The existing RC1 archives do not receive this source-only correction.
+  RC2 includes this correction; existing RC1 archives remain unchanged.
 - Inspector export reuses CLI redaction/consent and sensitive-content checks;
   inspector comparisons reject unhealthy captures.
 - Setup undo restores original JSONC bytes, checks for intervening edits, and

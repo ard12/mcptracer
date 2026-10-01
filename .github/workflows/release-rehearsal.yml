@@ -39,7 +39,7 @@ on:
           Purely a label for archive/SBOM naming - it is not checked against
           Cargo.toml.
         required: false
-        default: "v0.3.0-rc1"
+        default: "v0.3.0-rc2"
 
 env:
   CARGO_TERM_COLOR: always
@@ -122,6 +122,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          . /etc/os-release
+          test "$ID:$VERSION_ID" = "ubuntu:22.04"
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.35"
+          echo "Native runtime compatibility floor: Ubuntu $VERSION_ID / $(getconf GNU_LIBC_VERSION)"
           bin="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}"
           python scripts/check_glibc_compat.py "$bin" --max-glibc 2.35
 
