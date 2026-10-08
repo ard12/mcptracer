@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+pub mod sse;
+
+/// Maximum retained bytes for one transport frame or SSE data event.
+pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Direction {
     /// Matches [`Direction::as_db_str`], the `.mtrace` format, and the

@@ -14,9 +14,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use mcptracer_protocol::{Direction, McpMessage};
-use mcptracer_redact::{
-    sensitive_content_lint, unredacted_sensitive_keys, RedactionPolicy, SensitiveContentFinding,
-};
+use mcptracer_redact::{sensitive_content_lint, RedactionPolicy, SensitiveContentFinding};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -276,6 +274,7 @@ pub fn validate(document: &MtraceDocument) -> Result<()> {
     }
 
     let mut previous_seq = None;
+    let mut redaction_context = mcptracer_redact::RedactionContextTracker::default();
     for message in &document.messages {
         if let Some(previous) = previous_seq {
             if message.seq <= previous {
@@ -305,7 +304,15 @@ pub fn validate(document: &MtraceDocument) -> Result<()> {
 
         reject_message_field_payload_mismatch(message)?;
 
-        let unredacted = unredacted_sensitive_keys(&message.payload, &policy);
+        let context = redaction_context.observe(message.seq, &message.direction, &message.payload);
+        if !matches!(policy, RedactionPolicy::None) && redaction_context.has_lost_context() {
+            bail!("mtrace redaction request context exceeded bounded limits");
+        }
+        let unredacted = mcptracer_redact::unredacted_sensitive_keys_with_context(
+            &message.payload,
+            &policy,
+            context,
+        );
         if !unredacted.is_empty() {
             bail!(
                 "mtrace message {} has unredacted {} field(s): {}",
@@ -518,6 +525,68 @@ mod tests {
         let decoded = decode(&encode(&source).unwrap(), true).unwrap();
 
         assert_eq!(decoded, source);
+    }
+
+    fn schema_response(source: &mut MtraceDocument, schema: Value) {
+        let mut response = source.messages[0].clone();
+        response.seq = 1;
+        response.ts_ns = 1;
+        response.direction = "s2c".to_string();
+        response.message_kind = "response".to_string();
+        response.method = None;
+        response.tool_name = None;
+        response.payload = json!({"jsonrpc":"2.0","id":1,"result":{"tools":[{
+            "name":"dummy","inputSchema":schema
+        }]}});
+        source.messages.push(response);
+    }
+
+    #[test]
+    fn rejects_shape_selected_schema_secrets_atomically_on_import() {
+        let mut source = document();
+        schema_response(&mut source, json!({"api_key":"dummy-runtime-value"}));
+        let mut store = crate::Store::open_in_memory().unwrap();
+        let error = store
+            .import_mtrace(&encode_unchecked(&source), true)
+            .unwrap_err();
+        assert!(error.to_string().contains("unredacted"), "{error}");
+        assert!(!error.to_string().contains("dummy-runtime-value"));
+        assert!(store.list_sessions(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn validates_matched_schema_names_but_not_runtime_schema_extensions() {
+        let mut source = document();
+        source.messages[0].method = Some("tools/list".to_string());
+        source.messages[0].tool_name = None;
+        source.messages[0].payload = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+        schema_response(
+            &mut source,
+            json!({
+                "type":"object","properties":{"api_key":{"type":"string"}}
+            }),
+        );
+        validate(&source).unwrap();
+        let decoded = decode(&encode(&source).unwrap(), true).unwrap();
+        assert_eq!(decoded.messages[1].payload, source.messages[1].payload);
+        source.messages[1].payload["result"]["tools"][0]["inputSchema"]["password"] =
+            json!("dummy-runtime-value");
+        assert!(validate(&source)
+            .unwrap_err()
+            .to_string()
+            .contains("unredacted"));
+    }
+
+    #[test]
+    fn redaction_context_limits_are_not_silently_accepted() {
+        let mut source = document();
+        source.messages[0].method = Some("tools/list".to_string());
+        source.messages[0].tool_name = None;
+        let id = "x".repeat(1025);
+        source.messages[0].rpc_id = Some(serde_json::to_string(&id).unwrap());
+        source.messages[0].payload = json!({"jsonrpc":"2.0","id":id,"method":"tools/list"});
+        let error = validate(&source).unwrap_err();
+        assert!(error.to_string().contains("bounded limits"), "{error}");
     }
 
     #[test]

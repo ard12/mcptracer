@@ -730,6 +730,11 @@ fn capture_subscription_event(
                 "subscriptions/listen stream contains an oversized SSE JSON frame"
             ))
         }
+        SseEvent::Incomplete => {
+            return Err(anyhow!(
+                "subscriptions/listen stream ended inside an SSE frame"
+            ))
+        }
     };
     let payload: Value = serde_json::from_slice(&bytes)
         .context("subscriptions/listen stream contains non-JSON frame")?;
@@ -1715,6 +1720,11 @@ fn record_sse_event(
         SseEvent::Oversized => {
             dropped_messages.fetch_add(1, Ordering::Relaxed);
             tracing::warn!("SSE data event exceeded the frame size limit; not recorded");
+            Ok(None)
+        }
+        SseEvent::Incomplete => {
+            dropped_messages.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("SSE stream ended inside an event; partial event not recorded");
             Ok(None)
         }
     }

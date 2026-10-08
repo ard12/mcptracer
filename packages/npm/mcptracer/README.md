@@ -14,4 +14,10 @@ publication is completed.
 
 ## How It Works
 
+For local development, explicitly set `MCPTRACER_BIN` to the native binary you
+intend to run. Ancestor Cargo workspaces do not authorize automatic binary
+selection. An invalid explicit path fails instead of falling back to a download.
+Without an override, selection uses the account-local release cache or the
+checksum-verified release download path.
+
 This package resolves your OS and architecture (`win32-x64`, `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`), locates the high-performance native Rust binary, and executes it with zero runtime overhead.

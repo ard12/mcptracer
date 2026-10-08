@@ -35,26 +35,16 @@ def get_platform_triple() -> tuple[str, str, str]:
 
 
 def find_binary() -> Path | None:
-    if "MCPTRACER_BIN" in os.environ and os.path.exists(os.environ["MCPTRACER_BIN"]):
-        return Path(os.environ["MCPTRACER_BIN"])
+    if "MCPTRACER_BIN" in os.environ:
+        override = Path(os.environ["MCPTRACER_BIN"])
+        if not os.environ["MCPTRACER_BIN"] or not override.is_file():
+            raise RuntimeError("MCPTRACER_BIN must name an existing binary file")
+        return override
 
     target, _, exe = get_platform_triple()
 
-    # Only look for a dev build inside an actual cargo workspace checkout of
-    # this repo (identified by a Cargo.toml at that level), and only a few
-    # levels up -- not an unbounded walk to the filesystem root, which would
-    # execute a binary planted at target/{release,debug}/<exe> under any
-    # ancestor directory with zero validation.
-    cur = Path(__file__).resolve()
-    for parent in list(cur.parents)[:6]:
-        if not (parent / "Cargo.toml").is_file():
-            continue
-        dev_release = parent / "target" / "release" / exe
-        if dev_release.exists():
-            return dev_release
-        dev_debug = parent / "target" / "debug" / exe
-        if dev_debug.exists():
-            return dev_debug
+    # Never infer executable authority from an ambient Cargo.toml. Local
+    # development binaries require the operator's explicit MCPTRACER_BIN.
 
     cache_bin = Path.home() / ".mcptracer" / "bin" / f"mcptracer-v{VERSION}-{target}" / exe
     if cache_bin.exists():

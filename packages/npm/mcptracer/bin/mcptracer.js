@@ -30,43 +30,19 @@ function getPlatformTriple() {
   throw new Error(`Unsupported platform/architecture: ${type} ${arch}`);
 }
 
-// True only when this file is running out of a checkout of the mcptracer
-// repository itself (not a package published to npm and installed into some
-// unrelated project). Published packages must never fall through to the dev
-// paths below: `../../../../target/{release,debug}` resolves outside the
-// package root once installed, and if a file happens to exist there, `npx
-// mcptracer` would execute it without going through the SHA256-verified
-// download cache in ensureBinary()/verifyChecksum(). Presence of a
-// `Cargo.toml` alone isn't enough proof (an unrelated project could have
-// one), so also require it to declare this workspace by name.
-function isSourceCheckout() {
-  const cargoTomlPath = path.resolve(__dirname, '../../../../Cargo.toml');
-  if (!fs.existsSync(cargoTomlPath)) return false;
-
-  let contents;
-  try {
-    contents = fs.readFileSync(cargoTomlPath, 'utf8');
-  } catch {
-    return false;
-  }
-
-  return contents.includes('[workspace]') && contents.includes('crates/mcptracer-proxy');
-}
-
 function findBinary() {
-  if (process.env.MCPTRACER_BIN && fs.existsSync(process.env.MCPTRACER_BIN)) {
-    return process.env.MCPTRACER_BIN;
+  if (Object.prototype.hasOwnProperty.call(process.env, 'MCPTRACER_BIN')) {
+    const override = process.env.MCPTRACER_BIN;
+    if (!override || !fs.existsSync(override) || !fs.statSync(override).isFile()) {
+      throw new Error('MCPTRACER_BIN must name an existing binary file');
+    }
+    return override;
   }
 
   const { target, exe } = getPlatformTriple();
 
-  if (isSourceCheckout()) {
-    const devRelease = path.resolve(__dirname, '../../../../target/release', exe);
-    if (fs.existsSync(devRelease)) return devRelease;
-
-    const devDebug = path.resolve(__dirname, '../../../../target/debug', exe);
-    if (fs.existsSync(devDebug)) return devDebug;
-  }
+  // Cargo markers cannot authorize execution. Development binaries require
+  // the operator's explicit MCPTRACER_BIN selection.
 
   const homeDir = os.homedir();
   const cachedBin = path.join(homeDir, '.mcptracer', 'bin', `mcptracer-v${VERSION}-${target}`, exe);
@@ -191,4 +167,5 @@ function main() {
   });
 }
 
-main();
+module.exports = { findBinary };
+if (require.main === module) main();

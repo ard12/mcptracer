@@ -48,6 +48,11 @@ function fmtMs(ns) {
   return (ns / 1e6).toFixed(1) + "ms";
 }
 
+function expireAccessToken() {
+  accessToken = null;
+  try { window.sessionStorage.removeItem(tokenStorageKey); } catch { /* storage disabled */ }
+}
+
 async function fetchJson(url) {
   if (!accessToken) {
     throw new Error("Open the inspector link printed by mcptracer to view recordings.");
@@ -59,7 +64,7 @@ async function fetchJson(url) {
     cache: "no-store",
   });
   if (res.status === 401) {
-    try { window.sessionStorage.removeItem(tokenStorageKey); } catch { /* storage disabled */ }
+    expireAccessToken();
     throw new Error("Inspector access expired. Open the current link printed by mcptracer.");
   }
   if (!res.ok) {
@@ -84,6 +89,10 @@ async function downloadExport(sessionId) {
         mode: "same-origin",
         cache: "no-store",
       });
+      if (res.status === 401) {
+        expireAccessToken();
+        throw new Error("Inspector access expired. Open the current link printed by mcptracer.");
+      }
       if (res.ok) {
         const blob = await res.blob();
         const url = window.URL.createObjectURL(blob);
@@ -304,21 +313,49 @@ async function renderSessionList() {
   updateCompareBar();
 }
 
-function exchangeFor(model, seq, isRequest) {
-  return model.exchanges.find((e) =>
-    isRequest ? e.request_seq === seq : e.response_seq === seq
-  );
+function buildExchangeIndex(exchanges) {
+  const requests = new Map();
+  const responses = new Map();
+  for (const exchange of exchanges) {
+    // Preserve the previous find() semantics: first match wins.
+    if (exchange.request_seq != null && !requests.has(exchange.request_seq)) {
+      requests.set(exchange.request_seq, exchange);
+    }
+    if (exchange.response_seq != null && !responses.has(exchange.response_seq)) {
+      responses.set(exchange.response_seq, exchange);
+    }
+  }
+  return { requests, responses };
+}
+
+function exchangeFor(index, seq, isRequest) {
+  return (isRequest ? index.requests : index.responses).get(seq);
+}
+
+function renderCaptureHealth(data) {
+  const health = data.capture_health;
+  const issues = health && Array.isArray(health.issues) ? health.issues : null;
+  const dropped = Number(data.session.dropped_messages) || 0;
+  const healthy = health?.healthy === true && issues?.length === 0
+    && data.session.ended_at_ns != null && dropped === 0;
+  if (healthy) {
+    return el("div", { class: "meta", role: "status" }, ["Capture health: complete and valid."]);
+  }
+  const message = !issues
+    ? "Capture health unavailable. Do not use as verified evidence."
+    : `Capture incomplete or invalid. Not suitable for regression gates. ${dropped} dropped record(s); ${issues.length} integrity issue(s).`;
+  return el("div", { class: "error-panel", role: "alert" }, [message]);
 }
 
 function statusBadge(status) {
   return el("span", { class: `badge ${status.toLowerCase()}` }, [status]);
 }
 
-function renderMessageRow(msg, model) {
+function renderMessageRow(msg, exchangeIndex) {
   const isRequest = msg.message_kind === "request";
   const isNotification = msg.message_kind === "notification";
   const exchange = isRequest || msg.message_kind === "response"
-    ? exchangeFor(model, msg.seq, isRequest)
+    ? exchangeFor(exchangeIndex, msg.seq, isRequest)
     : undefined;
 
   const dirClass = msg.direction === "c2s" ? "dir-c2s" : "dir-s2c";
@@ -339,11 +376,14 @@ function renderMessageRow(msg, model) {
     el("td", {}, [fmtTime(msg.ts_ns)]),
   ]);
 
-  const payloadPanel = el("pre", { class: "payload mono" }, [
-    JSON.stringify(msg.payload, null, 2),
-  ]);
+  const payloadPanel = el("pre", { class: "payload mono" });
+  let payloadRendered = false;
 
   row.addEventListener("click", () => {
+    if (!payloadRendered) {
+      payloadPanel.textContent = JSON.stringify(msg.payload, null, 2);
+      payloadRendered = true;
+    }
     payloadPanel.classList.toggle("open");
   });
 
@@ -362,6 +402,8 @@ async function renderSessionDetail(sessionId) {
 
   const { session, messages, model } = data;
   const stats = model.stats;
+  const exchangeIndex = buildExchangeIndex(model.exchanges);
+  const captureHealth = renderCaptureHealth(data);
 
   const backLink = el("a", { class: "back-link", href: "/" }, ["← All Sessions"]);
   backLink.addEventListener("click", (e) => {
@@ -435,7 +477,7 @@ async function renderSessionDetail(sessionId) {
   ]);
 
   if (messages.length === 0) {
-    app.replaceChildren(header, statsBar, el("div", { class: "empty" }, ["No recorded messages."]));
+    app.replaceChildren(header, captureHealth, statsBar, el("div", { class: "empty" }, ["No recorded messages."]));
     return;
   }
 
@@ -451,7 +493,7 @@ async function renderSessionDetail(sessionId) {
       return true;
     });
 
-    const bodyRows = filtered.flatMap((msg) => renderMessageRow(msg, model));
+    const bodyRows = filtered.flatMap((msg) => renderMessageRow(msg, exchangeIndex));
     const tableWrap = el("div", { class: "table-wrap" }, [
       el("table", {}, [
         el("thead", {}, [
@@ -491,7 +533,7 @@ async function renderSessionDetail(sessionId) {
 
   const filterBar = el("div", { class: "filter-pills" }, pills);
 
-  app.replaceChildren(header, statsBar, filterBar, messageContainer);
+  app.replaceChildren(header, captureHealth, statsBar, filterBar, messageContainer);
   updateMessages();
 }
 

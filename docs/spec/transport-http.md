@@ -142,6 +142,55 @@ ids collide. The proxy instead partitions recordings per logical session:
 
 ## Capture Model
 
+Unreleased capture hardening: completed capture tasks are reaped before new
+work is inserted; closed upstream
+request receivers release idle capture work; malformed JSON and failed response
+streams mark capture loss. Request URLs are removed from upstream error
+diagnostics. The shared SSE decoder is protocol-owned, scans each incoming chunk
+once, and discards an oversized physical line through its terminating newline.
+The 8 MiB data-event limit is unchanged. These changes do not implement MCP HTTP
+cancellation. Unreleased hardening adds the admission/lifecycle limits below; these
+are not present in published RC2.
+
+### Unreleased aggregate recording admission
+
+- `--max-recording-sessions` defaults to 32 (range 1..256). A permit belongs
+  to each live writer, including finalization; removing its registry entry
+  does not release the slot early.
+- `--max-capture-exchanges` defaults to 64 (range 1..1024). One permit covers
+  both body directions and cleanup. At most two capture tasks start per admitted
+  exchange. Completed tasks are reaped.
+- `--recording-idle-seconds` defaults to 300 (range 1..86400). A periodic
+  reaper and admission checks retire only inactive recordings. Reusing a key
+  afterward opens a new recording rather than merging histories.
+  Admission detaches bounded finalization while retaining writer permits;
+  forwarding does not wait on an unrelated expired writer.
+- Provisional/DELETE boundaries retire after overlapping captures finish.
+  Retiring keys refuse new capture. Cancellation, forwarding errors and failed
+  admission release owned permits.
+- Excess traffic or storage-open failure still forwards without capture buffers
+  or dedicated capture tasks. A process-wide omitted-exchange counter and
+  sanitized stderr report loss; an existing matching recording also gains a
+  dropped count. Graceful shutdown fails after omissions/finalization failures.
+  Unrelated client recordings are never merged to hide overflow.
+- Response taps distinguish clean EOF (or all declared Content-Length bytes)
+  from stream failure or body cancellation. No extra EOF poll is required after
+  exact HTTP framing completion, including a zero-length response.
+  Loss is marked before closing the capture channel. Valid JSON prefixes do not
+  become complete responses after truncation.
+- SSE completeness is per blank-line-delimited event. An indefinite subscription
+  may stop between complete events as an observed event window; health does not
+  claim the infinite response ended or that future events were captured. Any
+  partial event, stream error, finite Content-Length truncation or capture
+  overflow marks loss. Even clean HTTP EOF cannot dispatch an undelimited event.
+  This follows the [SSE interpretation contract](https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation).
+  The current decoder supports LF and CRLF, not standalone CR delimiters; this
+  remains a protocol-conformance limitation, not a complete MCP/SSE claim.
+
+These bound recording-owned state, not transport connections or fixed RSS.
+Active streams are not expired by idle retirement. This does not add MCP HTTP
+cancellation, authentication, retries or Team work.
+
 The protocol crate owns the transport-neutral recording abstraction:
 
 ```rust
@@ -177,15 +226,18 @@ Each decoded message is written through the existing bounded storage writer:
 
 Request and individual SSE event capture are capped at 8 MiB. When a body or
 event exceeds the cap, forwarding continues, the event is not recorded, and a
-bounded dropped-message counter is incremented. This prevents a hostile
-upstream from forcing unbounded memory use.
+bounded dropped-message counter is incremented. This bounds individual
+captures. Unreleased hardening also bounds recording-owned session/writer and active
+capture-exchange cardinality.
 
 ## Ordering and Concurrency
 
-Every successfully decoded message receives a process-wide monotonic sequence
-number before it enters the storage queue. A Streamable HTTP proxy can have
+Each logical recording has a monotonic sequence counter. POST sequence/time is
+reserved before forwarding; responses reserve sequence when observed. This
+preserves request context when upstream answers before request-body EOF.
+A Streamable HTTP proxy can have
 concurrent HTTP requests and SSE streams, so sequence order represents the
-order MCPTracer observed complete messages, not a causal order guaranteed by
+order MCPTracer reserved capture positions, not a causal order guaranteed by
 the transport. Session correlation must continue to use JSON-RPC ids and
 timestamps.
 

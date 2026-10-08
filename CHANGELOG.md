@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Schema-aware redaction requires a matched `tools/list` request, not a
+  response payload that merely resembles a tool list. Schema property names
+  remain intact while sensitive runtime extensions are masked. Recording,
+  artifact validation and capture-health checks share the context rules.
+  Older artifacts accepted by shape-only validation may now be refused.
+- HTTP recording has configurable limits for live recording writers, active
+  capture exchanges and idle recording lifetime. Traffic beyond recording
+  admission still forwards; omissions and incomplete evidence are reported.
+- Inspector message rows use indexed exchange lookup and lazy payload
+  formatting. Session detail displays shared CLI capture-health assessment,
+  including incomplete or unavailable evidence rather than only exchange status.
+
+### Additional hardening
+
+- SSE framing bounds physical lines and rejects undelimited events at EOF.
+  Partial or failed HTTP captures cannot become complete evidence.
+- Inspector authentication failures clear stored client credentials. Wrappers
+  require explicit development-binary selection instead of ancestor discovery.
+- Stdio startup failures explicitly terminate and reap the child process.
+
+These source changes are not part of the existing RC2 release assets. This
+section does not announce a new binary release or completed security audit.
+
 ## 0.3.0-rc2 | Developer Preview Beta
 
 This generated tree targets a pre-1.0 prerelease, not stable/latest.

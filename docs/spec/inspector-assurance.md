@@ -32,7 +32,26 @@ routes.
 
 ## Verification
 
+Unreleased hardening: detail includes `capture_health.healthy` and
+`capture_health.issues`, computed by the same assessment as `validate` over
+the returned summary/messages. The UI displays an incomplete/invalid banner
+and dropped count even when individual exchanges have OK statuses. Missing
+assessment is unknown, never healthy. Issue details are not copied into it.
+
+Exchange lookup is indexed once per detail response. Request/response maps
+preserve first-match behavior for duplicate sequence references. Filtering
+reuses the maps, and payload formatting occurs only on first expansion.
+Small growth fixtures check visits and rendered status/latency, without timing
+thresholds or a dashboard rewrite.
+
 `commands::inspect` tests exercise direct handlers and authenticated HTTP
 requests for default refusal, explicit overrides, sensitive-content diagnostics
 and an unhealthy diff input. Payload secret values must not appear in refusal
 responses.
+
+Real-process local fixtures compare capture from healthy and malformed JSON,
+truncated HTTP, and finite SSE with/without the required event delimiter.
+Clean HTTP EOF alone does not turn an unfinished SSE event into complete
+evidence. Forwarded status/headers/received bytes stay unchanged, failed prefixes
+do not become complete message rows, CLI/detail health agree, and unhealthy
+self-diffs return HTTP 400.

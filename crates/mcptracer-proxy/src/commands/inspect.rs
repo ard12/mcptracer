@@ -272,6 +272,7 @@ async fn api_session_detail(State(state): State<InspectState>, Path(id): Path<St
         Err(error) => return error_response(&error),
     };
     let model = correlate(&messages);
+    let health = crate::session_health::assess_capture(&summary, &messages);
 
     let messages_json: Vec<_> = messages
         .iter()
@@ -307,6 +308,10 @@ async fn api_session_detail(State(state): State<InspectState>, Path(id): Path<St
         },
         "messages": messages_json,
         "model": model,
+        "capture_health": {
+            "healthy": health.is_healthy(),
+            "issues": health.issues,
+        },
     }))
     .into_response()
 }
@@ -516,6 +521,29 @@ mod tests {
         assert_eq!(value["session"]["id"], session_id);
         assert_eq!(value["messages"].as_array().unwrap().len(), 2);
         assert_eq!(value["model"]["stats"]["total_exchanges"], 1);
+        assert_eq!(value["capture_health"]["healthy"], true);
+        assert!(value["capture_health"]["issues"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn api_session_detail_reports_capture_loss_with_shared_health_predicate() {
+        let db_path = temp_db_path("detail-loss.db");
+        let session_id = seed_store(&db_path);
+        let store = Store::open(&db_path).unwrap();
+        store.increment_dropped_messages(&session_id, 1).unwrap();
+        let expected = crate::session_health::inspect_session(&store, &session_id).unwrap();
+        let response = api_session_detail(State(InspectState { db_path }), Path(session_id)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["capture_health"]["healthy"], false);
+        assert_eq!(
+            value["capture_health"]["issues"],
+            serde_json::to_value(expected.report.issues).unwrap()
+        );
     }
 
     #[tokio::test]

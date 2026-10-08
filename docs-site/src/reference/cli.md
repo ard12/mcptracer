@@ -86,6 +86,12 @@ Options:
           Permit binding the local reverse proxy to a non-loopback address
       --group-stateless-by-header <HEADER>
           Group otherwise-stateless requests carrying the same value in this header into one MCPTracer recording. Useful for MCP 2026-07-28, which has no protocol session id. The value is held only in process memory for correlation and is never persisted or printed
+      --max-recording-sessions <MAX_RECORDING_SESSIONS>
+          Maximum live recording sessions/writers. Excess traffic still forwards [default: 32]
+      --max-capture-exchanges <MAX_CAPTURE_EXCHANGES>
+          Maximum exchanges with active request/response capture [default: 64]
+      --recording-idle-seconds <RECORDING_IDLE_SECONDS>
+          Retire inactive recording sessions after this many seconds [default: 300]
   -h, --help
           Print help
 ```
