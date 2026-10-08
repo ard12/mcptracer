@@ -60,6 +60,16 @@ jobs:
         # Discovery roots imports in this directory even if site-packages has
         # an unrelated package named tests. Includes ELF packaging checks.
         run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Set up Node for wrapper and inspector regressions
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22"
+      - name: Node wrapper and inspector client regressions
+        run: node --test packages/npm/mcptracer/test/discovery.test.js tests/inspector-client.test.cjs
+      - name: Isolated source installation and first-use tutorial
+        # A fresh prefix/target prevents a preinstalled or feature-switched
+        # development binary from standing in for a user's source install.
+        run: python scripts/source_preview_smoke.py .
 
   lint:
     name: Lint

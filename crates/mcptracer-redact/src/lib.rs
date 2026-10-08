@@ -13,6 +13,9 @@
 
 use serde_json::Value;
 
+mod context;
+pub use context::{RedactionContext, RedactionContextTracker};
+
 /// Placeholder substituted for a redacted value.
 pub const REDACTED_PLACEHOLDER: &str = "***REDACTED***";
 
@@ -180,64 +183,71 @@ impl Redactor {
 
     /// Redact `value` in place according to the policy.
     pub fn redact(&self, value: &mut Value) {
+        self.redact_with_context(value, RedactionContext::Runtime);
+    }
+
+    /// Apply schema-aware rules only with request context supplied by the
+    /// shared bounded tracker. A response shape never selects this context.
+    pub fn redact_with_context(&self, value: &mut Value, context: RedactionContext) {
         if !self.is_active() {
             return;
         }
-        self.walk_message(value);
+        self.walk_message(value, context);
     }
 
     /// Redact `value` in place while preserving primitive JSON schema types
     /// (number -> 0, bool -> false, array -> [], object -> {}, string -> placeholder).
     pub fn redact_preserving_types(&self, value: &mut Value) {
+        self.redact_preserving_types_with_context(value, RedactionContext::Runtime);
+    }
+
+    pub fn redact_preserving_types_with_context(
+        &self,
+        value: &mut Value,
+        context: RedactionContext,
+    ) {
         if !self.is_active() {
             return;
         }
-        self.walk_message_typed(value);
+        self.walk_message_typed(value, context);
     }
 
-    /// Entry point for one full message payload. Recognizes the exact
-    /// `tools/list` response shape (`{"result":{"tools":[...]}}`) so the
-    /// schema-field exemption in [`Self::walk_tool_definition`] only ever
-    /// applies to a genuine tool definition there - never to a same-named
-    /// field anywhere else in a payload. A blanket "any key named
-    /// `inputSchema`/`outputSchema`" exemption would let a malicious or
-    /// buggy server smuggle unredacted data past `--redact default` simply
-    /// by naming a field `inputSchema`/`outputSchema` in a `tools/call`
-    /// result or any other message.
-    fn walk_message(&self, value: &mut Value) {
+    /// Schema-aware traversal requires matched tools/list request context.
+    /// Neither result.tools nor a field named inputSchema grants authority.
+    fn walk_message(&self, value: &mut Value, context: RedactionContext) {
         let Value::Object(top) = value else {
             self.walk(value);
             return;
         };
         for (key, child) in top.iter_mut() {
-            if key == "result" {
-                self.walk_result(child);
-            } else if self.is_sensitive_key(key) {
+            if self.is_sensitive_key(key) {
                 *child = self.placeholder.clone();
+            } else if key == "result" && context == RedactionContext::ToolListResponse {
+                self.walk_result(child);
             } else {
                 self.walk(child);
             }
         }
     }
 
-    fn walk_message_typed(&self, value: &mut Value) {
+    fn walk_message_typed(&self, value: &mut Value, context: RedactionContext) {
         let Value::Object(top) = value else {
             self.walk_typed(value);
             return;
         };
         for (key, child) in top.iter_mut() {
-            if key == "result" {
-                self.walk_result_typed(child);
-            } else if self.is_sensitive_key(key) {
+            if self.is_sensitive_key(key) {
                 *child = redact_value_typed(child);
+            } else if key == "result" && context == RedactionContext::ToolListResponse {
+                self.walk_result_typed(child);
             } else {
                 self.walk_typed(child);
             }
         }
     }
 
-    /// Walks a JSON-RPC response's `result` object, special-casing its
-    /// `tools` array (present only on a `tools/list` response) so each
+    /// Walks a context-matched tools/list response's `result` object,
+    /// special-casing its `tools` array so each
     /// element is walked as a tool definition. Every other field is walked
     /// generically, same as `walk_message`'s non-`result` fields.
     fn walk_result(&self, value: &mut Value) {
@@ -246,7 +256,7 @@ impl Redactor {
             return;
         };
         for (key, child) in result.iter_mut() {
-            if key == "tools" {
+            if key == "tools" && !self.is_sensitive_key(key) {
                 if let Value::Array(tools) = child {
                     for tool in tools.iter_mut() {
                         self.walk_tool_definition(tool);
@@ -268,7 +278,7 @@ impl Redactor {
             return;
         };
         for (key, child) in result.iter_mut() {
-            if key == "tools" {
+            if key == "tools" && !self.is_sensitive_key(key) {
                 if let Value::Array(tools) = child {
                     for tool in tools.iter_mut() {
                         self.walk_tool_definition_typed(tool);
@@ -296,11 +306,20 @@ impl Redactor {
             return;
         };
         for (key, child) in tool.iter_mut() {
-            if is_mcp_tool_schema_key(key) {
-                continue;
-            }
             if self.is_sensitive_key(key) {
                 *child = self.placeholder.clone();
+            } else if is_mcp_tool_schema_key(key) {
+                walk_schema(
+                    child,
+                    &|key| self.is_sensitive_key(key),
+                    &mut |key, value| {
+                        if self.is_sensitive_key(key) {
+                            *value = self.placeholder.clone();
+                        } else {
+                            self.walk(value);
+                        }
+                    },
+                );
             } else {
                 self.walk(child);
             }
@@ -313,11 +332,20 @@ impl Redactor {
             return;
         };
         for (key, child) in tool.iter_mut() {
-            if is_mcp_tool_schema_key(key) {
-                continue;
-            }
             if self.is_sensitive_key(key) {
                 *child = redact_value_typed(child);
+            } else if is_mcp_tool_schema_key(key) {
+                walk_schema(
+                    child,
+                    &|key| self.is_sensitive_key(key),
+                    &mut |key, value| {
+                        if self.is_sensitive_key(key) {
+                            *value = redact_value_typed(value);
+                        } else {
+                            self.walk_typed(value);
+                        }
+                    },
+                );
             } else {
                 self.walk_typed(child);
             }
@@ -388,6 +416,96 @@ fn is_mcp_tool_schema_key(key: &str) -> bool {
     matches!(key, "inputSchema" | "outputSchema")
 }
 
+/// Preserve property/definition *names*, not arbitrary values under a field
+/// named schema. Unrecognized extensions and default/example values still
+/// receive ordinary key-name redaction. Traversal is shared with validation.
+fn walk_schema(
+    value: &mut Value,
+    is_sensitive: &impl Fn(&str) -> bool,
+    visit: &mut impl FnMut(&str, &mut Value),
+) {
+    let Value::Object(schema) = value else {
+        // Only objects and booleans are schema containers. Invalid arrays
+        // must not become opaque envelopes for runtime secret-bearing keys.
+        if !value.is_boolean() {
+            visit("", value);
+        }
+        return;
+    };
+    for (key, child) in schema {
+        // Explicit custom policy keys override schema keyword containers.
+        // Property names within a valid properties map remain contracts.
+        if is_sensitive(key) {
+            visit(key, child);
+            continue;
+        }
+        match key.as_str() {
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas"
+                if child.is_object() =>
+            {
+                if let Value::Object(properties) = child {
+                    for (name, definition) in properties {
+                        if definition.is_object() || definition.is_boolean() {
+                            walk_schema(definition, is_sensitive, visit);
+                        } else {
+                            visit(name, definition);
+                        }
+                    }
+                }
+            }
+            "items"
+            | "additionalItems"
+            | "additionalProperties"
+            | "unevaluatedProperties"
+            | "unevaluatedItems"
+            | "propertyNames"
+            | "not"
+            | "if"
+            | "then"
+            | "else"
+            | "contains"
+            | "contentSchema"
+                if child.is_object() || child.is_boolean() =>
+            {
+                walk_schema(child, is_sensitive, visit);
+            }
+            "allOf" | "anyOf" | "oneOf" | "prefixItems" | "items" if child.is_array() => {
+                if let Value::Array(schemas) = child {
+                    for schema in schemas {
+                        if schema.is_object() || schema.is_boolean() {
+                            walk_schema(schema, is_sensitive, visit);
+                        } else {
+                            // Invalid schema data is never an exemption.
+                            visit(key, schema);
+                        }
+                    }
+                }
+            }
+            "dependencies" | "dependentRequired" if child.is_object() => {
+                if let Value::Object(dependencies) = child {
+                    for (name, definition) in dependencies {
+                        if definition.is_array()
+                            && definition
+                                .as_array()
+                                .is_some_and(|items| items.iter().all(Value::is_string))
+                        {
+                            continue;
+                        }
+                        if key == "dependencies"
+                            && (definition.is_object() || definition.is_boolean())
+                        {
+                            walk_schema(definition, is_sensitive, visit);
+                        } else {
+                            visit(name, definition);
+                        }
+                    }
+                }
+            }
+            _ => visit(key, child),
+        }
+    }
+}
+
 /// Lowercase `key` and strip separators so `api_key`, `apiKey`, and `API-KEY`
 /// all normalize to `apikey`.
 fn normalize_key(key: &str) -> String {
@@ -418,17 +536,23 @@ pub fn is_sensitive_key(key: &str) -> bool {
 
 /// Return JSON object keys whose values should have been masked by `policy`
 /// but are not. Returned keys never include payload values. Tool schema
-/// definitions remain exempt because their field names describe contracts, not
-/// runtime secrets - but, mirroring [`Redactor::walk_message`], only for a
-/// genuine tool definition inside a `tools/list` response's `result.tools[]`,
-/// never for a same-named field anywhere else in the payload.
+/// names require explicit matched request context through the context-aware
+/// variant. This context-free function always applies runtime rules.
 pub fn unredacted_sensitive_keys(value: &Value, policy: &RedactionPolicy) -> Vec<String> {
+    unredacted_sensitive_keys_with_context(value, policy, RedactionContext::Runtime)
+}
+
+pub fn unredacted_sensitive_keys_with_context(
+    value: &Value,
+    policy: &RedactionPolicy,
+    context: RedactionContext,
+) -> Vec<String> {
     if matches!(policy, RedactionPolicy::None) {
         return Vec::new();
     }
 
     let mut keys = Vec::new();
-    collect_unredacted_message(value, policy.custom_keys(), &mut keys);
+    collect_unredacted_message(value, policy.custom_keys(), &mut keys, context);
     keys.sort();
     keys.dedup();
     keys
@@ -455,13 +579,21 @@ fn push_if_unredacted(key: &str, child: &Value, custom_keys: &[String], keys: &m
 
 /// Mirrors [`Redactor::walk_message`]: entry point for one full message
 /// payload, special-casing a `tools/list` response's `result.tools[]`.
-fn collect_unredacted_message(value: &Value, custom_keys: &[String], keys: &mut Vec<String>) {
+fn collect_unredacted_message(
+    value: &Value,
+    custom_keys: &[String],
+    keys: &mut Vec<String>,
+    context: RedactionContext,
+) {
     let Value::Object(top) = value else {
         collect_unredacted_sensitive_keys(value, custom_keys, keys);
         return;
     };
     for (key, child) in top {
-        if key == "result" {
+        if key == "result"
+            && context == RedactionContext::ToolListResponse
+            && !matches_policy_sensitive_key(key, custom_keys)
+        {
             collect_unredacted_result(child, custom_keys, keys);
         } else {
             push_if_unredacted(key, child, custom_keys, keys);
@@ -476,7 +608,7 @@ fn collect_unredacted_result(value: &Value, custom_keys: &[String], keys: &mut V
         return;
     };
     for (key, child) in result {
-        if key == "tools" {
+        if key == "tools" && !matches_policy_sensitive_key(key, custom_keys) {
             if let Value::Array(tools) = child {
                 for tool in tools {
                     collect_unredacted_tool_definition(tool, custom_keys, keys);
@@ -500,7 +632,17 @@ fn collect_unredacted_tool_definition(
         return;
     };
     for (key, child) in tool {
-        if is_mcp_tool_schema_key(key) {
+        if is_mcp_tool_schema_key(key) && !matches_policy_sensitive_key(key, custom_keys) {
+            // Read-side clone permits reuse of the exact mutable traversal;
+            // there is no second, potentially divergent exemption rule.
+            let mut schema = child.clone();
+            walk_schema(
+                &mut schema,
+                &|key| matches_policy_sensitive_key(key, custom_keys),
+                &mut |key, value| {
+                    push_if_unredacted(key, value, custom_keys, keys);
+                },
+            );
             continue;
         }
         push_if_unredacted(key, child, custom_keys, keys);
@@ -812,7 +954,7 @@ mod tests {
         let input_schema = value["result"]["tools"][0]["inputSchema"].clone();
         let output_schema = value["result"]["tools"][0]["outputSchema"].clone();
 
-        redactor.redact(&mut value);
+        redactor.redact_with_context(&mut value, RedactionContext::ToolListResponse);
 
         assert_eq!(value["result"]["tools"][0]["inputSchema"], input_schema);
         assert_eq!(value["result"]["tools"][0]["outputSchema"], output_schema);
@@ -892,7 +1034,12 @@ mod tests {
                 }]
             }
         });
-        assert!(unredacted_sensitive_keys(&clean, &policy).is_empty());
+        assert!(unredacted_sensitive_keys_with_context(
+            &clean,
+            &policy,
+            RedactionContext::ToolListResponse
+        )
+        .is_empty());
     }
 
     #[test]
@@ -907,6 +1054,199 @@ mod tests {
         );
         assert_eq!(RedactionPolicy::from_name("bogus"), None);
         assert_eq!(RedactionPolicy::Default.as_str(), "default");
+    }
+
+    #[test]
+    fn tools_call_shape_cannot_select_schema_rules_in_either_mode() {
+        for typed in [false, true] {
+            let mut tracker = RedactionContextTracker::default();
+            tracker.observe(
+                0,
+                "c2s",
+                &json!({"jsonrpc":"2.0","id":7,"method":"tools/call"}),
+            );
+            let mut payload = json!({"jsonrpc":"2.0","id":7,"result":{"tools":[{
+                "name":"dummy",
+                "inputSchema":{"api_key":"dummy-runtime-value"},
+                "outputSchema":{"properties":{"password":"dummy-runtime-value"}}
+            }]}});
+            let context = tracker.observe(1, "s2c", &payload);
+            assert_eq!(context, RedactionContext::Runtime);
+            assert!(!unredacted_sensitive_keys_with_context(
+                &payload,
+                &RedactionPolicy::Default,
+                context
+            )
+            .is_empty());
+            let redactor = Redactor::new(RedactionPolicy::Default);
+            if typed {
+                redactor.redact_preserving_types_with_context(&mut payload, context);
+            } else {
+                redactor.redact_with_context(&mut payload, context);
+            }
+            assert!(!payload.to_string().contains("dummy-runtime-value"));
+            assert!(unredacted_sensitive_keys_with_context(
+                &payload,
+                &RedactionPolicy::Default,
+                context
+            )
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn matched_schema_contract_names_survive_but_runtime_extensions_do_not() {
+        for typed in [false, true] {
+            let mut tracker = RedactionContextTracker::default();
+            tracker.observe(
+                0,
+                "c2s",
+                &json!({"jsonrpc":"2.0","id":"list","method":"tools/list"}),
+            );
+            let mut payload = json!({"jsonrpc":"2.0","id":"list","result":{"tools":[{
+                "name":"dummy", "inputSchema":{
+                    "type":"object",
+                    "properties":{"api_key":{"type":"string"},"token":true},
+                    "$defs":{"secret":{"type":"string"}},
+                    "dependentRequired":{"token":["api_key"]},
+                    "allOf":[{"properties":{"password":{"type":"string"}}}],
+                    "api_key":"dummy-runtime-value",
+                    "extra":{"cookie":"dummy-runtime-value"}
+                },
+                "outputSchema":{"properties":{"credentials":{"type":"object"}}}
+            }]}});
+            let context = tracker.observe(1, "s2c", &payload);
+            assert_eq!(context, RedactionContext::ToolListResponse);
+            assert!(!unredacted_sensitive_keys_with_context(
+                &payload,
+                &RedactionPolicy::Default,
+                context
+            )
+            .is_empty());
+            let original_properties =
+                payload["result"]["tools"][0]["inputSchema"]["properties"].clone();
+            let redactor = Redactor::new(RedactionPolicy::Default);
+            if typed {
+                redactor.redact_preserving_types_with_context(&mut payload, context);
+            } else {
+                redactor.redact_with_context(&mut payload, context);
+            }
+            assert_eq!(
+                payload["result"]["tools"][0]["inputSchema"]["properties"],
+                original_properties
+            );
+            assert_eq!(
+                payload["result"]["tools"][0]["inputSchema"]["dependentRequired"]["token"],
+                json!(["api_key"])
+            );
+            assert!(!payload.to_string().contains("dummy-runtime-value"));
+            assert!(unredacted_sensitive_keys_with_context(
+                &payload,
+                &RedactionPolicy::Default,
+                context
+            )
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn context_free_calls_fail_closed_and_explicit_custom_schema_keys_win() {
+        let payload = json!({"result":{"tools":[{"inputSchema":{"properties":{"api_key":{"type":"string"}}}}]}});
+        let mut generic = payload.clone();
+        Redactor::new(RedactionPolicy::Default).redact(&mut generic);
+        assert_eq!(
+            generic["result"]["tools"][0]["inputSchema"]["properties"]["api_key"],
+            REDACTED_PLACEHOLDER
+        );
+        let policy = RedactionPolicy::from_cli("default", &["inputSchema".to_string()]).unwrap();
+        let mut explicit = payload;
+        Redactor::new(policy.clone())
+            .redact_with_context(&mut explicit, RedactionContext::ToolListResponse);
+        assert_eq!(
+            explicit["result"]["tools"][0]["inputSchema"],
+            REDACTED_PLACEHOLDER
+        );
+        assert!(unredacted_sensitive_keys_with_context(
+            &explicit,
+            &policy,
+            RedactionContext::ToolListResponse
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn invalid_schema_arrays_and_custom_envelopes_are_not_exempt() {
+        let context = RedactionContext::ToolListResponse;
+        for typed in [false, true] {
+            let mut payload = json!({"result":{"tools":[{
+                "inputSchema":[{"api_key":"dummy-runtime-value"}]
+            }]}});
+            let redactor = Redactor::new(RedactionPolicy::Default);
+            assert!(
+                !unredacted_sensitive_keys_with_context(&payload, redactor.policy(), context)
+                    .is_empty()
+            );
+            if typed {
+                redactor.redact_preserving_types_with_context(&mut payload, context);
+            } else {
+                redactor.redact_with_context(&mut payload, context);
+            }
+            assert!(!payload.to_string().contains("dummy-runtime-value"));
+            assert!(
+                unredacted_sensitive_keys_with_context(&payload, redactor.policy(), context)
+                    .is_empty()
+            );
+        }
+        for key in ["result", "tools"] {
+            let policy = RedactionPolicy::from_cli("default", &[key.to_string()]).unwrap();
+            let mut payload = json!({"result":{"tools":[{"inputSchema":{"type":"object"}}]}});
+            Redactor::new(policy.clone()).redact_with_context(&mut payload, context);
+            assert!(unredacted_sensitive_keys_with_context(&payload, &policy, context).is_empty());
+            assert!(!payload.to_string().contains("inputSchema"));
+        }
+    }
+
+    #[test]
+    fn custom_schema_keywords_override_contract_preservation() {
+        for key in [
+            "properties",
+            "items",
+            "definitions",
+            "dependencies",
+            "allOf",
+        ] {
+            let policy = RedactionPolicy::from_cli("default", &[key.to_string()]).unwrap();
+            let redactor = Redactor::new(policy.clone());
+            let mut schema = json!({"type":"object"});
+            schema[key] = if key == "allOf" {
+                json!([{"type":"object"}])
+            } else {
+                json!({"type":"object"})
+            };
+            let payload = json!({"result":{"tools":[{"inputSchema":schema}]}});
+            let context = RedactionContext::ToolListResponse;
+            assert!(!unredacted_sensitive_keys_with_context(&payload, &policy, context).is_empty());
+            for typed in [false, true] {
+                let mut redacted = payload.clone();
+                if typed {
+                    redactor.redact_preserving_types_with_context(&mut redacted, context);
+                    assert_eq!(
+                        redacted["result"]["tools"][0]["inputSchema"][key],
+                        if key == "allOf" { json!([]) } else { json!({}) }
+                    );
+                } else {
+                    redactor.redact_with_context(&mut redacted, context);
+                    assert_eq!(
+                        redacted["result"]["tools"][0]["inputSchema"][key],
+                        REDACTED_PLACEHOLDER
+                    );
+                    assert!(
+                        unredacted_sensitive_keys_with_context(&redacted, &policy, context)
+                            .is_empty()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

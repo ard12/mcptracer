@@ -120,8 +120,12 @@ always-on layer:
 
 1. **Key-name redaction**: values under sensitive key names (`password`,
    `api_key`, `authorization`, `token`, …) are replaced with
-   `"***REDACTED***"`. Tool-schema definitions (`inputSchema`/`outputSchema`)
-   are exempt because they describe contracts, not runtime values.
+   `"***REDACTED***"`. In the unreleased hardening, schema traversal requires
+   a response matched by direction and JSON-RPC id to an observed `tools/list`
+   request. A `result.tools` shape alone grants no exemption. Valid schema
+   property/definition names remain contracts; extensions, invalid containers
+   and sensitive-keyed defaults/examples receive ordinary redaction. Explicit
+   custom policy keys override schema keyword containers.
 2. **Pre-export content lint**: before writing any artifact, `export` runs
    `mcptracer_redact::sensitive_content_lint` over every message payload and
    the session's `server_command` metadata, scanning for `bearer_token`,
@@ -130,6 +134,30 @@ always-on layer:
    finding's **JSON pointer and category — never the value**.
    `--allow-sensitive-content` overrides the abort with a loud stderr
    warning.
+
+### Unreleased context and compatibility boundary
+
+Recording, export, import validation and capture-health assessment share one
+bounded context tracker and schema traversal. The tracker retains at most 4,096
+pending list requests with ids at most 1,024 encoded bytes. Unknown directions,
+sequence gaps, errors and unmatched responses fail closed. Id reuse invalidates
+prior request context; a new valid `tools/list` request can establish replacement
+context. Capacity
+or valid-list-id retention loss is observable as incomplete evidence; redacted
+export/import refuses it rather than silently changing a tool contract. The
+storage writer restores reserved capture-sequence order across direction-pump
+batches using existing byte reservations and a bounded reorder window.
+Forwarded bytes are unchanged.
+
+Context-free library redaction now applies runtime rules. Schema preservation
+requires context from the tracker, not an inference from payload shape.
+Historical artifacts accepted by shape-only validation may be refused.
+
+Typed/untyped redaction shares exemption selection, not placeholder proof.
+The typed helper can produce numeric/boolean/empty-container dummy values for
+local mock replay. These are not portable proof of redaction: artifact
+validation still requires the string placeholder under sensitive runtime keys.
+Import must not accept arbitrary zero/false values as sanitized.
 
 **What this does NOT guarantee:** the content lint is deterministic but
 cannot detect all possible sensitive data. It will not flag:

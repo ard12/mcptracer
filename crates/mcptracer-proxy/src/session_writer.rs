@@ -3,6 +3,7 @@
 //! frame drain/forward loop. `record` and `replay` both build on this so the
 //! writer-thread and redaction wiring stay identical between the two.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use mcptracer_protocol::{
     parse_stdio_frame, Direction, McpMessage, StdioFrame, StdioTransport, Transport,
 };
-use mcptracer_redact::{is_sensitive_key, Redactor, REDACTED_PLACEHOLDER};
+use mcptracer_redact::{is_sensitive_key, RedactionContextTracker, Redactor, REDACTED_PLACEHOLDER};
 use mcptracer_storage::Store;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
@@ -23,13 +24,14 @@ use tracing::warn;
 /// single MCP stdio frame larger than this is treated as a protocol error:
 /// the affected direction stops pumping rather than growing memory without
 /// bound. Frames already drained and forwarded are unaffected.
-pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+pub use mcptracer_protocol::MAX_FRAME_BYTES;
 
 /// Upper bound on the source-payload bytes held by the asynchronous storage
 /// queue. The existing channel capacity remains a second bound on event count.
 pub const STORAGE_QUEUE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const STORAGE_EVENT_OVERHEAD_BYTES: usize = 1024;
 const STORAGE_WRITE_BATCH_MESSAGES: usize = 128;
+const STORAGE_REORDER_MAX_MESSAGES: usize = 4096;
 type StorageClose = (i64, u64, mpsc::Sender<std::result::Result<(), String>>);
 
 pub enum StorageEvent {
@@ -200,6 +202,15 @@ pub fn spawn_storage_writer(
     thread::spawn(move || {
         let mut failed_message_records = 0_u64;
         let mut first_failure: Option<String> = None;
+        let mut redaction_context = RedactionContextTracker::default();
+        // Direction pumps reserve sequence before awaiting forwarding. Channel
+        // arrival can therefore be reversed, even across writer batches.
+        // Reservations remain owned here, so the existing byte budget also
+        // bounds this reorder buffer. A second limit bounds its cardinality.
+        let mut pending = BTreeMap::new();
+        let mut next_seq = 0_u64;
+        let mut arrival = 0_u64;
+        let mut context_loss_reported = false;
 
         while let Ok(event) = rx.recv() {
             #[cfg(test)]
@@ -217,30 +228,85 @@ pub fn spawn_storage_writer(
 
             let mut messages = Vec::with_capacity(STORAGE_WRITE_BATCH_MESSAGES);
             let mut close = None;
+            #[cfg(test)]
+            let mut barrier = None;
 
             collect_storage_event(event, &mut messages, &mut close);
             while close.is_none() && messages.len() < STORAGE_WRITE_BATCH_MESSAGES {
                 match rx.try_recv() {
+                    #[cfg(test)]
+                    Ok(StorageEvent::TestBarrier {
+                        entered_tx,
+                        release_rx,
+                    }) => {
+                        barrier = Some((entered_tx, release_rx));
+                        break;
+                    }
                     Ok(event) => collect_storage_event(event, &mut messages, &mut close),
                     Err(_) => break,
                 }
             }
 
+            for item in messages.drain(..) {
+                pending.insert((item.0.seq, arrival), item);
+                arrival = arrival.wrapping_add(1);
+            }
+            while let Some((&(seq, _), _)) = pending.first_key_value() {
+                let pressure = pending.len() >= STORAGE_REORDER_MAX_MESSAGES;
+                if seq > next_seq && close.is_none() && !pressure {
+                    break;
+                }
+                if seq > next_seq && pressure && !context_loss_reported {
+                    failed_message_records = failed_message_records.saturating_add(1);
+                    first_failure.get_or_insert_with(|| {
+                        "redaction sequence context was incomplete".to_string()
+                    });
+                    context_loss_reported = true;
+                }
+                let Some((_, item)) = pending.pop_first() else {
+                    break;
+                };
+                next_seq = next_seq.max(seq.saturating_add(1));
+                messages.push(item);
+            }
             if !messages.is_empty() {
                 for (message, _) in &mut messages {
-                    redactor.redact(&mut message.payload);
+                    let context = redaction_context.observe(
+                        message.seq,
+                        message.direction.as_db_str(),
+                        &message.payload,
+                    );
+                    if redactor.is_active()
+                        && redaction_context.has_lost_context()
+                        && !context_loss_reported
+                    {
+                        failed_message_records = failed_message_records.saturating_add(1);
+                        first_failure.get_or_insert_with(|| {
+                            "redaction request context was incomplete".to_string()
+                        });
+                        context_loss_reported = true;
+                    }
+                    redactor.redact_with_context(&mut message.payload, context);
                 }
-                if let Err(err) =
-                    store.write_messages(&session_id, messages.iter().map(|(message, _)| message))
-                {
-                    warn!("failed to write MCP message batch: {err}");
-                    failed_message_records = failed_message_records
-                        .saturating_add(u64::try_from(messages.len()).unwrap_or(u64::MAX));
-                    first_failure.get_or_insert_with(|| {
-                        "failed to persist one or more MCP message records".to_string()
-                    });
+                for batch in messages.chunks(STORAGE_WRITE_BATCH_MESSAGES) {
+                    if let Err(err) =
+                        store.write_messages(&session_id, batch.iter().map(|(message, _)| message))
+                    {
+                        warn!("failed to write MCP message batch: {err}");
+                        failed_message_records = failed_message_records
+                            .saturating_add(u64::try_from(batch.len()).unwrap_or(u64::MAX));
+                        first_failure.get_or_insert_with(|| {
+                            "failed to persist one or more MCP message records".to_string()
+                        });
+                    }
                 }
                 drop(messages);
+            }
+
+            #[cfg(test)]
+            if let Some((entered_tx, release_rx)) = barrier {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
             }
 
             let Some((ended_at_ns, dropped_messages, done_tx)) = close else {
@@ -994,5 +1060,76 @@ mod tests {
         );
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_context_survives_reversed_arrival_across_writer_batches() {
+        let dir = std::env::temp_dir().join(format!(
+            "mcptracer-schema-order-{}-{}",
+            std::process::id(),
+            super::now_ns()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("capture.db");
+        let store = Store::open(&db).unwrap();
+        let id = store.create_session("test", "dummy", "stdio", 0).unwrap();
+        store.set_redaction_policy(&id, "default", &[]).unwrap();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let budget = Arc::new(StorageQueueBudget::new(8192));
+        let writer = spawn_storage_writer(
+            store,
+            id.clone(),
+            Redactor::new(RedactionPolicy::Default),
+            rx,
+            Arc::clone(&budget),
+        );
+        let dropped = AtomicU64::new(0);
+        let response = McpMessage {
+            seq: 1,
+            direction: Direction::ServerToClient,
+            timestamp_ns: 1,
+            payload: json!({"jsonrpc":"2.0","id":1,"result":{"tools":[{
+                "name":"dummy","inputSchema":{"type":"object","properties":{"api_key":{"type":"string"}},"password":"dummy-runtime-value"}
+            }]}}),
+            payload_bytes: 256,
+        };
+        // The response is consumed in an earlier writer batch while the
+        // direction pump has not yet enqueued its lower-sequence request.
+        try_record(&tx, response, &dropped, &budget);
+        let release = pause_writer(&tx);
+        assert!(
+            budget.queued_bytes() > 0,
+            "reorder buffer must own the reservation"
+        );
+        try_record(
+            &tx,
+            McpMessage {
+                payload: json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+                ..message(0)
+            },
+            &dropped,
+            &budget,
+        );
+        release.send(()).unwrap();
+        finish_before_deadline(tx, writer, 0).unwrap();
+        assert_eq!(budget.queued_bytes(), 0);
+        let store = Store::open(&db).unwrap();
+        let messages = store.get_messages(&id).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&messages[1].payload).unwrap();
+        assert_eq!(
+            payload["result"]["tools"][0]["inputSchema"]["properties"]["api_key"],
+            json!({"type":"string"})
+        );
+        assert!(!payload.to_string().contains("dummy-runtime-value"));
+        assert!(crate::session_health::inspect_session(&store, &id)
+            .unwrap()
+            .report
+            .is_healthy());
+        let artifact = store
+            .export_mtrace_document(&id, Default::default())
+            .unwrap();
+        mcptracer_storage::mtrace::validate(&artifact).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

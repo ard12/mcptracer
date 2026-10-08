@@ -1,13 +1,18 @@
 # mcptracer (Python CLI Wrapper)
 
-Zero-install Python CLI wrapper for **[MCPTracer](https://github.com/ard12/mcptracer)** — the executable evidence and release-assurance layer for the Model Context Protocol (MCP).
+Python CLI wrapper candidate for **[MCPTracer](https://github.com/ard12/mcptracer)**, the executable evidence and release-assurance layer for MCP.
 
-## Quick Start
+## Current installation status
 
-```bash
-pip install mcptracer
-mcptracer --version
-```
+This package is not published to PyPI. Use the native binary preview or source
+installation in the main installation guide. Do not assume that a package with
+this name in a registry is maintained by this repository.
+
+For local wrapper development, explicitly set `MCPTRACER_BIN` to the native
+binary you intend to run. The wrapper never discovers development binaries
+from ancestor Cargo workspaces. An invalid explicit path fails without falling
+back to a download. The account-local release cache and checksum-verified
+download path remain available when no override is set.
 
 ## Common Workflows
 

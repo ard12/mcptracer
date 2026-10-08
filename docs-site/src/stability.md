@@ -61,7 +61,7 @@ breaking change, called out explicitly in the changelog:
 
 ## Platform evidence
 
-Publicly accessible hosted test, MSRV, and real-SDK results are pending/unverified for source revision `6ef066e06e251bd6806f4cd51e797d58fd9ff61c`. Windows-local checks do not establish Linux or macOS success.
+Publicly accessible hosted test, MSRV, and real-SDK results are pending/unverified for source revision `8c7a88a709c553de2c70ba2263f8f77098ddfb78`. Windows-local checks do not establish Linux or macOS success.
 
 Check the Actions tab for the exact source revision; claims in this section are
 emitted only when matching hosted evidence is supplied to the exporter.

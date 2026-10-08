@@ -2,8 +2,10 @@ use anyhow::{bail, Result};
 use mcptracer_model::{
     validate_session, SessionIntegrityIssue, SessionIntegrityIssueKind, SessionIntegrityReport,
 };
-use mcptracer_redact::{unredacted_sensitive_keys, RedactionPolicy};
-use mcptracer_storage::{Store, StoredMessage};
+use mcptracer_redact::{
+    unredacted_sensitive_keys_with_context, RedactionContextTracker, RedactionPolicy,
+};
+use mcptracer_storage::{SessionSummary, Store, StoredMessage};
 
 pub struct SessionHealth {
     pub session_id: String,
@@ -17,11 +19,25 @@ pub struct SessionHealth {
 pub fn inspect_session(store: &Store, session_id_or_prefix: &str) -> Result<SessionHealth> {
     let summary = store.get_session_summary(session_id_or_prefix)?;
     let messages = store.get_messages(&summary.id)?;
+    let report = assess_capture(&summary, &messages);
+    Ok(SessionHealth {
+        session_id: summary.id,
+        messages,
+        report,
+    })
+}
+
+/// Assess exactly the summary and message snapshot presented to a caller.
+/// The inspector and CLI share this predicate rather than UI-only heuristics.
+pub fn assess_capture(
+    summary: &SessionSummary,
+    messages: &[StoredMessage],
+) -> SessionIntegrityReport {
     let dropped_messages = summary.dropped_messages.max(0) as u64;
-    let mut report = validate_session(&messages, dropped_messages);
+    let mut report = validate_session(messages, dropped_messages);
     append_redaction_issues(
         &mut report,
-        &messages,
+        messages,
         &summary.redaction_policy,
         &summary.redaction_keys_json,
     );
@@ -33,11 +49,7 @@ pub fn inspect_session(store: &Store, session_id_or_prefix: &str) -> Result<Sess
         });
     }
 
-    Ok(SessionHealth {
-        session_id: summary.id,
-        messages,
-        report,
-    })
+    report
 }
 
 fn append_redaction_issues(
@@ -69,11 +81,27 @@ fn append_redaction_issues(
         }
     };
 
+    let mut redaction_context = RedactionContextTracker::default();
+    let mut context_loss_reported = false;
     for message in messages {
         let Ok(payload) = serde_json::from_str(&message.payload) else {
             continue;
         };
-        let keys = unredacted_sensitive_keys(&payload, &policy);
+        let context = redaction_context.observe(message.seq, &message.direction, &payload);
+        if !matches!(policy, RedactionPolicy::None)
+            && redaction_context.has_lost_context()
+            && !context_loss_reported
+        {
+            report.issues.push(SessionIntegrityIssue {
+                kind: SessionIntegrityIssueKind::DroppedMessages,
+                seq: Some(message.seq),
+                detail:
+                    "bounded redaction context was lost; schema completeness is not established"
+                        .to_string(),
+            });
+            context_loss_reported = true;
+        }
+        let keys = unredacted_sensitive_keys_with_context(&payload, &policy, context);
         if !keys.is_empty() {
             report.issues.push(SessionIntegrityIssue {
                 kind: SessionIntegrityIssueKind::UnredactedSensitiveValue,
@@ -189,6 +217,57 @@ mod tests {
             .issues
             .iter()
             .any(|issue| { issue.kind == SessionIntegrityIssueKind::SessionNotClosed }));
+    }
+
+    #[test]
+    fn health_uses_matched_schema_context_and_rejects_call_result_spoofs() {
+        for method in ["tools/list", "tools/call"] {
+            let store = Store::open_in_memory().unwrap();
+            let session_id = store.create_session("test", "dummy", "stdio", 0).unwrap();
+            store
+                .set_redaction_policy(&session_id, "default", &[])
+                .unwrap();
+            for (seq, direction, payload) in [
+                (
+                    0,
+                    Direction::ClientToServer,
+                    json!({"jsonrpc":"2.0","id":1,"method":method}),
+                ),
+                (
+                    1,
+                    Direction::ServerToClient,
+                    json!({"jsonrpc":"2.0","id":1,"result":{"tools":[{
+                        "name":"dummy","inputSchema":{"properties":{"api_key":{"type":"string"}}}
+                    }]}}),
+                ),
+            ] {
+                store
+                    .write_message(
+                        &session_id,
+                        &McpMessage {
+                            seq,
+                            direction,
+                            timestamp_ns: seq as i64,
+                            payload,
+                            payload_bytes: 128,
+                        },
+                    )
+                    .unwrap();
+            }
+            store.close_session(&session_id, 2).unwrap();
+            let health = inspect_session(&store, &session_id).unwrap();
+            assert_eq!(health.report.is_healthy(), method == "tools/list");
+            if method == "tools/call" {
+                assert!(
+                    health
+                        .report
+                        .issues
+                        .iter()
+                        .any(|issue| issue.kind
+                            == SessionIntegrityIssueKind::UnredactedSensitiveValue)
+                );
+            }
+        }
     }
 
     #[test]

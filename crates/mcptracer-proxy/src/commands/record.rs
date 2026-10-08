@@ -90,20 +90,33 @@ pub async fn run(args: RecordArgs, db_path: PathBuf) -> Result<()> {
     let redactor = Redactor::new(policy.clone());
 
     let mut server_process = spawn_server_process(&args.server_args)?;
-    let server_stdin = server_process
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("failed to open server stdin"))?;
-    let server_stdout = server_process
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("failed to open server stdout"))?;
-
-    let store = Store::open(&db_path)?;
-    let session_id = store.create_session(&args.client, &server_command, "stdio", now_ns())?;
-    if redactor.is_active() {
-        store.set_redaction_policy(&session_id, policy.as_str(), policy.custom_keys())?;
-    }
+    let setup = (|| -> Result<_> {
+        let server_stdin = server_process
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("failed to open server stdin"))?;
+        let server_stdout = server_process
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("failed to open server stdout"))?;
+        let store = Store::open(&db_path)?;
+        let session_id = store.create_session(&args.client, &server_command, "stdio", now_ns())?;
+        if redactor.is_active() {
+            store.set_redaction_policy(&session_id, policy.as_str(), policy.custom_keys())?;
+        }
+        Ok((server_stdin, server_stdout, store, session_id))
+    })();
+    let (server_stdin, server_stdout, store, session_id) = match setup {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // kill_on_drop sends a kill but cannot await reaping. Do not let
+            // a startup failure exit while child cleanup is still pending.
+            if let Err(cleanup_error) = cleanup_failed_start(&mut server_process).await {
+                eprintln!("[mcptracer] MCP server startup cleanup failed: {cleanup_error}");
+            }
+            return Err(error);
+        }
+    };
     let (storage_tx, storage_rx) = mpsc::sync_channel::<StorageEvent>(4096);
     let queue_budget = Arc::new(StorageQueueBudget::new(STORAGE_QUEUE_MAX_BYTES));
     let storage_handle = spawn_storage_writer(
@@ -178,6 +191,17 @@ pub async fn run(args: RecordArgs, db_path: PathBuf) -> Result<()> {
 
     eprintln!("[mcptracer] session {} ended", session_id);
     Ok(())
+}
+
+async fn cleanup_failed_start(server: &mut Child) -> Result<()> {
+    match tokio::time::timeout(SERVER_REAP_GRACE, server.kill()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => match server.try_wait()? {
+            Some(_) => Ok(()),
+            None => Err(error).context("failed to terminate MCP server after startup failure"),
+        },
+        Err(_) => Err(anyhow!("MCP server startup cleanup timed out")),
+    }
 }
 
 /// Run both forwarding pumps until one ends or an operator stop is requested,
@@ -399,7 +423,7 @@ mod tests {
     use tokio::sync::watch;
     use tokio::time::Instant;
 
-    use super::{coordinate_pumps, reap_server};
+    use super::{cleanup_failed_start, coordinate_pumps, reap_server};
 
     const DRAIN_GRACE: Duration = Duration::from_secs(30);
 
@@ -607,6 +631,25 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("failed to spawn test process")
+    }
+
+    #[tokio::test]
+    async fn startup_failure_cleanup_terminates_and_reaps_a_live_server() {
+        let mut server = spawn(runs_until_killed());
+        cleanup_failed_start(&mut server)
+            .await
+            .expect("cleanup failed");
+        assert!(server.try_wait().expect("try_wait failed").is_some());
+    }
+
+    #[tokio::test]
+    async fn startup_failure_cleanup_accepts_an_already_exited_server() {
+        let mut server = spawn(exits_immediately());
+        server.wait().await.expect("wait failed");
+        cleanup_failed_start(&mut server)
+            .await
+            .expect("cleanup failed");
+        assert!(server.try_wait().expect("try_wait failed").is_some());
     }
 
     #[tokio::test]

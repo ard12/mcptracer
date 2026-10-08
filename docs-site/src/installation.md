@@ -83,7 +83,7 @@ installed binary for version/help checks and the complete rug-pull tutorial.
 
 ## Platform evidence
 
-Publicly accessible hosted test, MSRV, and real-SDK results are pending/unverified for source revision `6ef066e06e251bd6806f4cd51e797d58fd9ff61c`. Windows-local checks do not establish Linux or macOS success.
+Publicly accessible hosted test, MSRV, and real-SDK results are pending/unverified for source revision `8c7a88a709c553de2c70ba2263f8f77098ddfb78`. Windows-local checks do not establish Linux or macOS success.
 
 Check the Actions tab for the exact commit you intend to use; that is the only
 evidence that applies to it. Building requires Rust 1.85+ and a working C

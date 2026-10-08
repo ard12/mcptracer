@@ -657,6 +657,7 @@ impl Store {
         let redactor = Redactor::new(effective_policy.clone());
         let tags = self.get_session_tags(&summary.id)?;
         let messages = self.get_messages(&summary.id)?;
+        let mut redaction_context = mcptracer_redact::RedactionContextTracker::default();
         let messages = messages
             .into_iter()
             .map(|message| {
@@ -668,7 +669,11 @@ impl Store {
                         message.seq
                     );
                 }
-                redactor.redact(&mut payload);
+                let context = redaction_context.observe(message.seq, &message.direction, &payload);
+                if redactor.is_active() && redaction_context.has_lost_context() {
+                    anyhow::bail!("redaction request context exceeded bounded limits; refusing schema-altering export");
+                }
+                redactor.redact_with_context(&mut payload, context);
                 Ok(mtrace::MtraceMessage {
                     seq: message.seq,
                     ts_ns: message.ts_ns,
@@ -3241,5 +3246,67 @@ mod tests {
 
         drop(locker);
         let _ = fs::remove_dir_all(dir);
+    }
+}
+#[cfg(test)]
+mod export_context_tests {
+    use super::*;
+
+    #[test]
+    fn export_redaction_uses_request_context_not_response_shape() {
+        for method in ["tools/list", "tools/call"] {
+            let store = Store::open_in_memory().unwrap();
+            let session_id = store.create_session("test", "dummy", "stdio", 0).unwrap();
+            let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":{"name":"dummy"}});
+            let response = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"tools":[{
+                "name":"dummy",
+                "inputSchema":{
+                    "type":"object",
+                    "properties":{"api_key":{"type":"string"}},
+                    "password":"dummy-runtime-value"
+                }
+            }]}});
+            for (seq, direction, payload) in [
+                (0, mcptracer_protocol::Direction::ClientToServer, request),
+                (1, mcptracer_protocol::Direction::ServerToClient, response),
+            ] {
+                store
+                    .write_message(
+                        &session_id,
+                        &mcptracer_protocol::McpMessage {
+                            seq,
+                            direction,
+                            timestamp_ns: seq as i64,
+                            payload,
+                            payload_bytes: 128,
+                        },
+                    )
+                    .unwrap();
+            }
+            store.close_session(&session_id, 2).unwrap();
+            let artifact = store
+                .export_mtrace_document(
+                    &session_id,
+                    mtrace::ExportOptions {
+                        force_default_redaction: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let schema = &artifact.messages[1].payload["result"]["tools"][0]["inputSchema"];
+            assert!(!schema.to_string().contains("dummy-runtime-value"));
+            if method == "tools/list" {
+                assert_eq!(
+                    schema["properties"]["api_key"],
+                    serde_json::json!({"type":"string"})
+                );
+            } else {
+                assert_eq!(
+                    schema["properties"]["api_key"],
+                    mcptracer_redact::REDACTED_PLACEHOLDER
+                );
+            }
+            mtrace::validate(&artifact).unwrap();
+        }
     }
 }
