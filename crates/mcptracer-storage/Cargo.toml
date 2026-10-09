@@ -20,5 +20,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
-mcptracer-protocol = { path = "../mcptracer-protocol", version = "=0.3.0-rc2" }
-mcptracer-redact = { path = "../mcptracer-redact", version = "=0.3.0-rc2" }
+mcptracer-protocol = { path = "../mcptracer-protocol", version = "=0.3.0-rc3" }
+mcptracer-redact = { path = "../mcptracer-redact", version = "=0.3.0-rc3" }
