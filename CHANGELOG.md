@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.3.0-rc3] - Developer Preview Beta
+
+RC3 packages the capture and evidence hardening previously available only on
+public main. RC1 and RC2 tags and assets remain unchanged. Linux packaging
+retains the Ubuntu 22.04 / glibc 2.35 compatibility floor. This is a prerelease,
+not stable and not a completed independent security audit.
+See [release notes](docs/releases/v0.3.0-rc3.md).
+
 ### Changed
 
 - Schema-aware redaction requires a matched `tools/list` request, not a
@@ -23,13 +31,13 @@
 - Inspector authentication failures clear stored client credentials. Wrappers
   require explicit development-binary selection instead of ancestor discovery.
 - Stdio startup failures explicitly terminate and reap the child process.
-
-These source changes are not part of the existing RC2 release assets. This
-section does not announce a new binary release or completed security audit.
+- CI validates isolated source installation and the first-use tutorial on
+  Linux, Windows and macOS. Rehearsal tests extracted default-feature archives
+  on all five supported targets before release.
 
 ## 0.3.0-rc2 | Developer Preview Beta
 
-This generated tree targets a pre-1.0 prerelease, not stable/latest.
+RC2 is a pre-1.0 prerelease, not stable/latest.
 RC2 supersedes RC1's Linux GLIBC_2.39 limitation with Ubuntu 22.04 / glibc 2.35
 packaging checks on built and extracted binaries. RC1 archives and tag remain
 unchanged. See [RC2 release notes](docs/releases/v0.3.0-rc2.md); installation

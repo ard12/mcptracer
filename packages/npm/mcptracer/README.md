@@ -6,7 +6,7 @@ Zero-install CLI wrapper for **[MCPTracer](https://github.com/ard12/mcptracer)**
 
 This repository contains a local npm package candidate, but `mcptracer` is not
 published to npm. Registry-based `npx` and `npm install` commands are not
-available. Install the `v0.3.0-rc2` binary preview, once its release assets are available, with the explicit
+available. Install the `v0.3.0-rc3` binary preview, once its release assets are available, with the explicit
 version pin in the main [installation guide](https://github.com/ard12/mcptracer/blob/main/docs-site/src/installation.md).
 
 This README will describe the npm wrapper's usage after an authorized package

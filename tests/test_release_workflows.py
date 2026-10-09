@@ -56,7 +56,7 @@ class ReleaseWorkflowContracts(unittest.TestCase):
         self.assertIn("prerelease: ${{ contains(github.ref_name, '-') }}", self.release)
         self.assertIn("make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'legacy' }}", self.release)
         self.assertIn("Developer Preview Beta", self.release)
-        self.assertIn("docs/releases/v0.3.0-rc2.md", self.release)
+        self.assertIn("docs/releases/v0.3.0-rc3.md", self.release)
 
 
 if __name__ == "__main__":

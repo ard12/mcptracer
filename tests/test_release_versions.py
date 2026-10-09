@@ -10,6 +10,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseVersionContracts(unittest.TestCase):
+    def test_preview_notes_and_install_guidance_match_workspace(self):
+        cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        tag = "v" + cargo["workspace"]["package"]["version"]
+        notes = ROOT / f"docs/releases/{tag}.md"
+        self.assertTrue(notes.is_file())
+        self.assertIn(f"# {tag} | Developer Preview Beta", notes.read_text(encoding="utf-8"))
+        for path in (
+            "README.md",
+            "docs-site/src/installation.md",
+            "scripts/install.sh",
+            "scripts/install.ps1",
+            ".github/workflows/release-rehearsal.yml",
+            ".github/workflows/release.yml",
+        ):
+            self.assertIn(tag, (ROOT / path).read_text(encoding="utf-8"), path)
+
     def test_distribution_versions_match_workspace(self):
         cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
         expected = cargo["workspace"]["package"]["version"]

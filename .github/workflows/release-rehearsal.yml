@@ -39,7 +39,7 @@ on:
           Purely a label for archive/SBOM naming - it is not checked against
           Cargo.toml.
         required: false
-        default: "v0.3.0-rc2"
+        default: "v0.3.0-rc3"
 
 env:
   CARGO_TERM_COLOR: always

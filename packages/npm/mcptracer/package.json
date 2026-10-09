@@ -1,6 +1,6 @@
 {
   "name": "mcptracer",
-  "version": "0.3.0-rc2",
+  "version": "0.3.0-rc3",
   "description": "Zero-install CLI wrapper for MCPTracer - the executable evidence and release-assurance layer for MCP",
   "bin": {
     "mcptracer": "./bin/mcptracer.js"
